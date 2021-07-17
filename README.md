@@ -6,7 +6,7 @@ pip install git+https://github.com/huggingface/transformers.git
 
 # Datasets (test)
 
-1. MRC : SQuAD 1.1
+1. MRC : MultiRC
 2. Classification : CoLA(GLUE)
 3. Commonsense : SocialIQA
 
