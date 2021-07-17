@@ -12,7 +12,7 @@
 
 # Todo
 1. Tokenization
-- [ ] Add Task specific Tokens <cola>, <mrc>, <com>
+- [ ] Add Task specific Tokens \<cola\>, \<mrc\>, \<com\>
 2. DatasetLoader
 - [ ] Loads multiple tasks in one batch
 - [ ] Adds task label to clarify which type of task the data belongs
