@@ -1,0 +1,27 @@
+{
+    "model_name_or_path" : "roberta-base",
+    "use_fast_tokenizer" : true,
+    "config_name" : null,
+    "tokenizer_name" : null,
+
+    "dataset_name" : "wikitext",
+    "dataset_config_name" : "wikitext-2-raw-v1",
+    "train_file" : null,
+    "validation_file" : null,
+    "validation_split_percentage" : 5,
+    "max_seq_length" : null,
+    "line_by_line" : false,
+    "pad_to_max_length" : false,
+    "max_train_samples" : null,
+    "max_eval_samples" : null,
+    
+    "do_train" : true,
+    "do_eval" : true,
+    "output_dir" : "/home/aimaster/lab_storage/models/test",
+    "evaluation_strategy" : "epoch",
+    "per_device_train_batch_size" : 2,
+    "per_device_eval_batch_size" : 4,
+    "do_predict" : false,
+    "adafactor" : false
+}
+
