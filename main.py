@@ -236,9 +236,7 @@ def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
-    args_str = '--model_name_or_path roberta-base --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 --do_train --do_eval --output_dir /home/aimaster/lab_storage/models/test --evaluation_strategy epoch --per_device_train_batch_size 2 --per_device_eval_batch_size 2' 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses(args=args_str.split())
+    model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath("./config.json"))
     """
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
