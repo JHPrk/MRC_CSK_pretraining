@@ -1,4 +1,8 @@
 # Welcome to MRC + CSK Pretraining Models!
+need to install transformers 2.9.0 dev <br>
+```
+pip install git+https://github.com/huggingface/transformers.git
+```
 
 # Datasets (test)
 
