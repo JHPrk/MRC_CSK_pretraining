@@ -1,0 +1,15 @@
+datasets/CoLA.zip
+datasets/socialiqa-train-dev.zip
+datasets/squad1.1.zip
+datasets/classification/CoLA/dev.tsv
+datasets/classification/CoLA/test.tsv
+datasets/classification/CoLA/train.tsv
+datasets/classification/CoLA/original/raw/in_domain_dev.tsv
+datasets/classification/CoLA/original/raw/in_domain_train.tsv
+datasets/classification/CoLA/original/raw/out_of_domain_dev.tsv
+datasets/classification/CoLA/original/tokenized/in_domain_dev.tsv
+datasets/classification/CoLA/original/tokenized/in_domain_train.tsv
+datasets/classification/CoLA/original/tokenized/out_of_domain_dev.tsv
+datasets/mrc/multirc/test.jsonl
+datasets/mrc/multirc/train.jsonl
+datasets/mrc/multirc/val.jsonl
