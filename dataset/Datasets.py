@@ -10,11 +10,7 @@ dev_set = "dev.csv"
 info_file = "info.json"
 dir_path = os.path.dirname(os.path.abspath(__file__))
 
-DatasetFactory = {
-    "CoLA": CoLADataset,
-    "SocialIQA": SocialIQADataset,
-    "MultiRC": MultiRCDataset,
-}
+
 
 
 class Dataset :
@@ -81,6 +77,11 @@ class MultiRCDataset(Dataset) :
         return {k : v for k, v in tokenized_examples.items()}
 
 
+DatasetFactory = {
+    "CoLA": CoLADataset,
+    "SocialIQA": SocialIQADataset,
+    "MultiRC": MultiRCDataset,
+}
 
 if __name__ == "__main__":
     task = "CoLA"

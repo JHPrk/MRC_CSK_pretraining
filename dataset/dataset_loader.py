@@ -4,7 +4,7 @@ from transformers import AutoTokenizer
 import json
 import os
 
-from .Datasets import DatasetFactory
+from Datasets import DatasetFactory
 
 categories = ["classification", "commonsense", "mrc"]
 train_set = "train.csv"
