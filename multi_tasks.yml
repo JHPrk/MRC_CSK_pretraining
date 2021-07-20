@@ -3,9 +3,9 @@ TASK1:
   loss: CrossEntropyLoss
   process: normal
   task_id: 1
-  dataroot: datasets/MultiRC
+  dataroot: mrc/MultiRC
   max_seq_length: 23
-  batch_size: 128
+  batch_size: 1024
   eval_batch_size: 1024
   train_split: trainval
   val_split: minval
@@ -16,8 +16,8 @@ TASK2:
   loss: CrossEntropyLoss
   process: normal
   task_id: 2
-  dataroot: datasets/CoLA
-  max_seq_length: 26
+  dataroot: classification/CoLA
+  max_seq_length: 512
   batch_size: 128
   eval_batch_size: 1024
   train_split: train
@@ -29,8 +29,8 @@ TASK3:
   loss: CrossEntropyLoss
   process: normal
   task_id: 3
-  dataroot: datasets/SocialIQA
-  max_seq_length: 16
+  dataroot: commonsense/SocialIQA
+  max_seq_length: 128
   batch_size: 64
   eval_batch_size: 1024
   train_split: train
