@@ -32,3 +32,5 @@ dataset/mrc/multirc/test.jsonl
 dataset/mrc/multirc/train.jsonl
 dataset/mrc/multirc/val.jsonl
 tokenizers/__pycache__/__init__.cpython-37.pyc
+custom_tokenizers/__pycache__/__init__.cpython-37.pyc
+custom_tokenizers/__pycache__/muppet_tokenizer.cpython-37.pyc

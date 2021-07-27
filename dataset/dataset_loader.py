@@ -1,10 +1,12 @@
 import datasets
 from datasets import load_dataset
 from transformers import AutoTokenizer
-import json
-import os
+import sys, os
+sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
-from Datasets import DatasetFactory
+
+from mtl_datasets import DatasetFactory
+from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 
 categories = ["classification", "commonsense", "mrc"]
 train_set = "train.csv"
@@ -14,39 +16,43 @@ info_file = "info.json"
 dataset_path = "./"
 
 
+
 # dataset Load needs
 # task_names
 # cateogries : classification, commonsense, mrc
 # files structure : train.csv, dev.csv, test.csv with info.json
 # json file has ... choices, type, columns
-def LoadDataset(args,task_args,ids,split="trainval"):
+def LoadDataset(args, task_args,ids,split="trainval"):
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
+    tokenizer = RobertaMuppetTokenizer.from_pretrained(args["model_name_or_path"], use_fast=True)
 
-    task_datasets_train = {}
-    task_datasets_val = {}
-    task_dataloader_train = {}
-    task_dataloader_val = {}
+
+    task_datasets = {}
+    task_datasets_loss = {}
+    task_dataloader = {}
     task_ids = []
-    task_batch_size = {}
-    task_num_iters = {}
 
     for i, task_id in enumerate(ids):
-        task = "TASK" + task_id
+        task = "TASK" + str(task_id)
         task_name = task_args[task]["name"]
         task_ids.append(task)
         dataroot = task_args[task]["dataroot"]
-        task_datasets_train[task] = None
-            
+        max_seq_length = task_args[task]['max_seq_length']
+        split = task_args[task]['train_split']
+        loss = task_args[task]['loss']
+        task_datasets_loss[task] = loss
+        task_datasets[task] = DatasetFactory[task_name](task_name, dataroot, split, max_seq_length, tokenizer)
+        task_dataloader[task] = task_datasets[task]()
+        
+    return (task_datasets, 
+        task_dataloader,
+        task_datasets_loss, 
+        task_ids
+    )
 
-
-
-
-def dataset_loader(path, categories, name):
-    datasets = load_dataset('csv', data_files={'train': './commonsenseqa/train_set.csv','test': './commonsenseqa/test_set.csv','validation': './commonsenseqa/dev_set.csv'})
-
-def main():
-    dataset_names = ["hello word"]
+def main(args,task_args, ids):
+    task_datasets, task_dataloader, task_datasets_loss, task_ids = LoadDataset(args, task_args, ids)
+    print("need_random")
 
 if __name__ == '__main__':
     import yaml
@@ -57,4 +63,5 @@ if __name__ == '__main__':
         task_args = yaml.load(f, Loader=yaml.FullLoader)
         print(task_args['TASK1'])
     ids = [1,2,3]
-    main(task_args)
+    args = {"model_name_or_path" : "roberta-base"}
+    main(args, task_args, ids)
