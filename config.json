@@ -8,6 +8,7 @@
     "dataset_config_name" : null,
     "multitask_learning" : true,
     "tasks" : ["CoLA", "socialIQA", "multiRC"],
+    "task_ids" : [1,2,3],
     "categories" : ["classification","commonsense","mrc"],
     "losses" : ["CrossEntopyLoss", "MultipleChoice","MultipleChoice"],
     "train_file" : null,

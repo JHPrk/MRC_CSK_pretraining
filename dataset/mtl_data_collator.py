@@ -6,6 +6,7 @@ from transformers import DataCollatorWithPadding
 from transformers.file_utils import PaddingStrategy
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from transformers.utils.dummy_sentencepiece_objects import T5Tokenizer
 
 # Social IQA
 @dataclass
@@ -46,3 +47,10 @@ CollatorFactory = {
     "SocialIQA": DataCollatorForMultipleChoice,
     "MultiRC": DataCollatorWithPadding,
 }
+
+def main():
+    print("hello world!")
+
+    
+if __name__ == "__main__":
+    main()

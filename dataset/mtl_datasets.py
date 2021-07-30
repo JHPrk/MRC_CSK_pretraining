@@ -14,11 +14,13 @@ cls_task_token = "madeupword0002"
 com_token="madeupword0001"
 mrc_token="madeupword0000"
 
+train_key = "train"
+eval_key = "eval"
 
 class Dataset :
     def __init__(self, task, dataroot, split, max_seq_length, tokenizer):
         path = dir_path + "/" + dataroot + '/'
-        self.datasets = load_dataset('csv', data_files={'train': path + train_set, 'validation' : path + dev_set})
+        self.datasets = load_dataset('csv', data_files={train_key: path + train_set, eval_key : path + dev_set})
         self.configs = None
         with open(path + info_file) as json_file:
             self.configs = json.load(json_file)
