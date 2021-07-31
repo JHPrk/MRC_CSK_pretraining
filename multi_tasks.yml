@@ -3,7 +3,7 @@ TASK1:
   loss: CrossEntropyLoss
   process: normal
   task_id: 1
-  dataroot: mrc/MultiRC
+  dataroot: mrc/multirc
   max_seq_length: 1024
   train_split: trainval
   val_split: minval
@@ -13,7 +13,7 @@ TASK2:
   process: normal
   task_id: 2
   dataroot: classification/CoLA
-  max_seq_length: 512
+  max_seq_length: 1024
   train_split: train
   val_split: val
 TASK3:
@@ -21,7 +21,16 @@ TASK3:
   loss: CrossEntropyLoss
   process: normal
   task_id: 3
-  dataroot: commonsense/SocialIQA
-  max_seq_length: 256
+  dataroot: commonsense/socialIQA
+  max_seq_length: 1024
+  train_split: train
+  val_split: val
+TASK4:
+  name: CommonsenseQA
+  loss: CrossEntropyLoss
+  process: normal
+  task_id: 4
+  dataroot: commonsense/commonsenseQA
+  max_seq_length: 1024
   train_split: train
   val_split: val

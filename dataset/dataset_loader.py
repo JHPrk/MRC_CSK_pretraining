@@ -116,7 +116,7 @@ class MtpDataLoader:
             indices = []
             if task_batch == 0 :
                 continue
-            for i,x in enumerate(self.task_datasets_sampler["TASK3"]["train"]) : 
+            for i,x in enumerate(self.task_datasets_sampler[task]["train"]) : 
                 indices.append(x)
                 if (i + 1) % task_batch == 0 : 
                     break
@@ -165,5 +165,5 @@ if __name__ == '__main__':
     with open(dirname(dirname(abspath(__file__))) + '/multi_tasks.yml') as f:
         task_args = yaml.load(f, Loader=yaml.FullLoader)
         print(task_args['TASK1'])
-    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64, "task_ids" : [2,3]}
+    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64, "task_ids" : [2,3,4]}
     main(args, task_args)

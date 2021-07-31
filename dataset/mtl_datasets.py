@@ -44,7 +44,7 @@ class CoLADataset(Dataset) :
 
         return {k : v for k, v in tokenized_examples.items()}
 
-class SocialIQADataset(Dataset) :
+class CommonsenseQADataset(Dataset) :
     def __init__(self, task, dataroot, split, max_seq_length, tokenizer):
         super().__init__(task,dataroot,split,max_seq_length, tokenizer)
         self.choice_names = ["answerA", "answerB", "answerC", "answerD", "answerE"]
@@ -65,6 +65,27 @@ class SocialIQADataset(Dataset) :
         mapped_result = {k: [v[i:i+5] for i in range(0, len(v), 5)] for k, v in tokenized_examples.items()}
         return mapped_result
 
+class SocialIQADataset(Dataset) :
+    def __init__(self, task, dataroot, split, max_seq_length, tokenizer):
+        super().__init__(task,dataroot,split,max_seq_length, tokenizer)
+        self.choice_names = ["answerA", "answerB", "answerC"]
+        
+    def preprocess_function(self, examples):
+        first_sentences = [[com_token + question] * 3 for i, question in enumerate(examples["Context"])]
+        question_headers = examples["Context"]
+        second_sentences = [[f"{examples[choice][i]}" for choice in self.choice_names] for i, header in enumerate(question_headers)]
+        examples['class'] = [self.task] * len(examples["Context"])
+
+        # Flatten
+        first_sentences = sum(first_sentences, [])
+        second_sentences = sum(second_sentences, [])
+        
+        tokenized_examples = self.tokenizer(first_sentences, second_sentences, truncation=True)
+
+        # Un-flatten
+        mapped_result = {k: [v[i:i+3] for i in range(0, len(v), 3)] for k, v in tokenized_examples.items()}
+        return mapped_result
+
 class MultiRCDataset(Dataset) :
     #passage,question,answer,label
     def __init__(self, task, dataroot, split, max_seq_length, tokenizer):
@@ -81,8 +102,9 @@ class MultiRCDataset(Dataset) :
 
 DatasetFactory = {
     "CoLA": CoLADataset,
-    "SocialIQA": SocialIQADataset,
     "MultiRC": MultiRCDataset,
+    "SocialIQA": SocialIQADataset,
+    "CommonsenseQA": CommonsenseQADataset,
 }
 
 

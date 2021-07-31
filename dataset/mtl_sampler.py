@@ -18,8 +18,9 @@ def compute_sampling_probability(task_configs, data_type):
 
 SamplerFactory = {
     "CoLA": RandomSampler,
-    "SocialIQA": RandomSampler,
     "MultiRC": RandomSampler,
+    "SocialIQA": RandomSampler,
+    "CommonsenseQA": RandomSampler,
 }
 
 def make_dataset_loader(dataset):
