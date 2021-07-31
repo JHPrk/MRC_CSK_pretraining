@@ -23,8 +23,8 @@ dataset_path = "./"
 
 
 class MtpDataLoader:
-    def __init__(self, args,task_args, ids, split="trainval"):
-        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(args, task_args, ids)
+    def __init__(self, args,task_args, split="trainval"):
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(args, task_args)
         self.task_configs = task_configs
         self.task_datasets = task_datasets
         self.task_datasets_loss = task_datasets_loss
@@ -44,8 +44,8 @@ class MtpDataLoader:
     # cateogries : classification, commonsense, mrc
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
-    def LoadDataset(self, args, task_args, ids, split="trainval"):
-
+    def LoadDataset(self, args, task_args, split="trainval"):
+        ids = args["task_ids"]
         tokenizer = RobertaMuppetTokenizer.from_pretrained(args["model_name_or_path"], use_fast=True)
 
 
@@ -125,6 +125,7 @@ class MtpDataLoader:
         return batch    
 
     def __iter__(self) :
+        self.cur = 0
         while self.total_steps > self.cur:
             task_batch_counter = self._num_each_task_in_batch()
             batch = self._get_batch(task_batch_counter)
@@ -132,7 +133,7 @@ class MtpDataLoader:
             yield batch
 
 
-def main(args,task_args, ids):
+def main(args,task_args):
     from tqdm.auto import tqdm
     #task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = LoadDataset(args, task_args, ids)
     #sampling_probability = compute_sampling_probability(task_configs, "train")
@@ -142,14 +143,19 @@ def main(args,task_args, ids):
     #batch = get_batch(task_ids, task_batch_counter, task_datasets_collator, task_datasets, task_datasets_sampler)
     #for value in batch:
     #    print(batch[value])
-    mtp_loader = MtpDataLoader(args, task_args, ids)
+    mtp_loader = MtpDataLoader(args, task_args)
     progress = tqdm(range(mtp_loader.total_steps))
     for i, batch in enumerate(mtp_loader):
         print("steps : ", i)
         for task_batch in batch:
             print(task_batch, " : ", len(batch[task_batch]['labels']))
         progress.update(1)
-
+    progress = tqdm(range(mtp_loader.total_steps))
+    for i, batch in enumerate(mtp_loader):
+        print("steps2 : ", i)
+        for task_batch in batch:
+            print(task_batch, " : ", len(batch[task_batch]['labels']))
+        progress.update(1)
 
 if __name__ == '__main__':
     import yaml
@@ -159,6 +165,5 @@ if __name__ == '__main__':
     with open(dirname(dirname(abspath(__file__))) + '/multi_tasks.yml') as f:
         task_args = yaml.load(f, Loader=yaml.FullLoader)
         print(task_args['TASK1'])
-    ids = [1, 2, 3]
-    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64}
-    main(args, task_args, ids)
+    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64, "task_ids" : [2,3]}
+    main(args, task_args)
