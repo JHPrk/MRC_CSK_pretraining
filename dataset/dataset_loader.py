@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 from random import choices
 from collections import Counter
 
-from mtl_datasets import DatasetFactory
+from mtl_datasets import DatasetFactory, task_types
 from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 from mtl_data_collator import CollatorFactory
 from mtl_sampler import SamplerFactory, compute_sampling_probability
@@ -23,7 +23,7 @@ dataset_path = "./"
 
 
 class MtpDataLoader:
-    def __init__(self, args,task_args, split="trainval"):
+    def __init__(self, args, task_args, split="trainval"):
         task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(args, task_args)
         self.task_configs = task_configs
         self.task_datasets = task_datasets
@@ -61,12 +61,15 @@ class MtpDataLoader:
             task = "TASK" + str(task_id)
             task_name = task_args[task]["name"]
             task_ids.append(task)
+            task_type = task_args[task]["type"]
+            task_category = task_args[task]["category"]
+            task_choices = task_args[task]["choices"]
             dataroot = task_args[task]["dataroot"]
             max_seq_length = task_args[task]['max_seq_length']
             split = task_args[task]['train_split']
             loss = task_args[task]['loss']
             task_datasets_loss[task] = loss
-            task_configs[task] = DatasetFactory[task_name](task_name, dataroot, split, max_seq_length, tokenizer)
+            task_configs[task] = DatasetFactory[task_name](task_name, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer)
             cur_datasets = task_configs[task]()
 
             task_datasets[task] = {}
@@ -82,6 +85,7 @@ class MtpDataLoader:
             task_datasets_sampler[task]["eval"] = SamplerFactory[task_name](task_datasets[task]["eval"])
 
             task_datasets_loader[task] = {}
+            """
             task_datasets_loader[task]["train"] = DataLoader(
                     task_datasets[task]["train"],
                     sampler=task_datasets_sampler[task]["train"],
@@ -96,6 +100,7 @@ class MtpDataLoader:
                     batch_size=2,
                     pin_memory=True,
                 )
+                """
         return (task_configs, 
             task_datasets,
             task_datasets_loss, 
@@ -147,12 +152,6 @@ def main(args,task_args):
     progress = tqdm(range(mtp_loader.total_steps))
     for i, batch in enumerate(mtp_loader):
         print("steps : ", i)
-        for task_batch in batch:
-            print(task_batch, " : ", len(batch[task_batch]['labels']))
-        progress.update(1)
-    progress = tqdm(range(mtp_loader.total_steps))
-    for i, batch in enumerate(mtp_loader):
-        print("steps2 : ", i)
         for task_batch in batch:
             print(task_batch, " : ", len(batch[task_batch]['labels']))
         progress.update(1)

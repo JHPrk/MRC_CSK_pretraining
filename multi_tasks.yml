@@ -1,36 +1,55 @@
 TASK1:
   name: MultiRC
   loss: CrossEntropyLoss
+  choices: 2
+  type: cls
+  category: mrc
   process: normal
   task_id: 1
   dataroot: mrc/multirc
   max_seq_length: 1024
-  train_split: trainval
-  val_split: minval
+  train_split: train
 TASK2:
   name: CoLA
   loss: CrossEntropyLoss
+  choices: 2
+  type: cls
+  category: classification
   process: normal
   task_id: 2
   dataroot: classification/CoLA
   max_seq_length: 1024
   train_split: train
-  val_split: val
 TASK3:
   name: SocialIQA
   loss: CrossEntropyLoss
+  choices: 3
+  type: mc
+  category: commonsense
   process: normal
   task_id: 3
   dataroot: commonsense/socialIQA
   max_seq_length: 1024
   train_split: train
-  val_split: val
 TASK4:
   name: CommonsenseQA
   loss: CrossEntropyLoss
+  choices: 5
+  type: mc
+  category: commonsense
   process: normal
   task_id: 4
   dataroot: commonsense/commonsenseQA
   max_seq_length: 1024
   train_split: train
-  val_split: val
+TASK5:
+  name: SQuAD 1.1
+  loss: CrossEntropyLoss
+  choices: 1024
+  type: span
+  category: mrc
+  process: normal
+  task_id: 5
+  dataroot: mrc/squad1.1
+  max_seq_length: 1024
+  train_split: train
