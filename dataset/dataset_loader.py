@@ -148,6 +148,10 @@ def main(args,task_args):
     #batch = get_batch(task_ids, task_batch_counter, task_datasets_collator, task_datasets, task_datasets_sampler)
     #for value in batch:
     #    print(batch[value])
+    # task 1 multirc: (bn, 511) output: (bn) 0, 1
+    # task 2 cola: (bn, 23) output: (bn) 0, 1
+    # task 3 socialIQA: (bn, 3, 40) output: (bn) 0, 1, 2
+    # task 4 CommonsenseQA: (bn, 5, 28) output: (bn) 0, 1, 2, 3, 4
     mtp_loader = MtpDataLoader(args, task_args)
     progress = tqdm(range(mtp_loader.total_steps))
     for i, batch in enumerate(mtp_loader):
@@ -164,5 +168,5 @@ if __name__ == '__main__':
     with open(dirname(dirname(abspath(__file__))) + '/multi_tasks.yml') as f:
         task_args = yaml.load(f, Loader=yaml.FullLoader)
         print(task_args['TASK1'])
-    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64, "task_ids" : [2,3,4]}
+    args = {"model_name_or_path" : "roberta-base", "batch_size" : 64, "task_ids" : [1, 2, 3, 4]}
     main(args, task_args)
