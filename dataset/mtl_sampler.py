@@ -2,7 +2,7 @@
 import sys, os
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
-from mtl_data_collator import CollatorFactory
+from dataset.mtl_data_collator import CollatorFactory
 from torch.utils.data import DataLoader, RandomSampler
 
 # datasampler (Distributed 이용 필요) or parallel

@@ -8,10 +8,10 @@ sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 from random import choices
 from collections import Counter
 
-from mtl_datasets import DatasetFactory, task_types
+from dataset.mtl_datasets import DatasetFactory, task_types
 from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
-from mtl_data_collator import CollatorFactory
-from mtl_sampler import SamplerFactory, compute_sampling_probability
+from dataset.mtl_data_collator import CollatorFactory
+from dataset.mtl_sampler import SamplerFactory, compute_sampling_probability
 
 categories = ["classification", "commonsense", "mrc"]
 train_set = "train.csv"
@@ -23,8 +23,8 @@ dataset_path = "./"
 
 
 class MtpDataLoader:
-    def __init__(self, args, task_args, split="trainval"):
-        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(args, task_args)
+    def __init__(self, task_ids, model_name_or_path, batch_size, task_args, split="trainval"):
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(task_ids, model_name_or_path, task_args)
         self.task_configs = task_configs
         self.task_datasets = task_datasets
         self.task_datasets_loss = task_datasets_loss
@@ -34,7 +34,7 @@ class MtpDataLoader:
         self.task_ids = task_ids
 
         self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, "train")
-        self.batch_size = args["batch_size"]
+        self.batch_size = batch_size
         self.total_steps = int(self.total_datasize / self.batch_size)
         self.cur = 0
         
@@ -44,9 +44,9 @@ class MtpDataLoader:
     # cateogries : classification, commonsense, mrc
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
-    def LoadDataset(self, args, task_args, split="trainval"):
-        ids = args["task_ids"]
-        tokenizer = RobertaMuppetTokenizer.from_pretrained(args["model_name_or_path"], use_fast=True)
+    def LoadDataset(self, task_ids, model_name_or_path, task_args, split="trainval"):
+        ids = task_ids
+        tokenizer = RobertaMuppetTokenizer.from_pretrained(model_name_or_path, use_fast=True)
 
 
         task_configs = {}
