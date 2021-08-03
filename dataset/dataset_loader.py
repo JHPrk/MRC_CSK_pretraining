@@ -23,8 +23,8 @@ dataset_path = "./"
 
 
 class MtpDataLoader:
-    def __init__(self, task_ids, model_name_or_path, batch_size, task_args, split="trainval"):
-        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(task_ids, model_name_or_path, task_args)
+    def __init__(self, task_ids, model_name_or_path, batch_size, task_args, tokenizer, split="trainval"):
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(task_ids, tokenizer, task_args)
         self.task_configs = task_configs
         self.task_datasets = task_datasets
         self.task_datasets_loss = task_datasets_loss
@@ -32,6 +32,8 @@ class MtpDataLoader:
         self.task_datasets_sampler = task_datasets_sampler
         self.task_datasets_loader = task_datasets_loader
         self.task_ids = task_ids
+        self.model_name_or_path = model_name_or_path
+        self.tokenizer = tokenizer
 
         self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, "train")
         self.batch_size = batch_size
@@ -44,9 +46,8 @@ class MtpDataLoader:
     # cateogries : classification, commonsense, mrc
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
-    def LoadDataset(self, task_ids, model_name_or_path, task_args, split="trainval"):
+    def LoadDataset(self, task_ids, task_args, tokenizer, split="trainval"):
         ids = task_ids
-        tokenizer = RobertaMuppetTokenizer.from_pretrained(model_name_or_path, use_fast=True)
 
 
         task_configs = {}
@@ -136,6 +137,10 @@ class MtpDataLoader:
             batch = self._get_batch(task_batch_counter)
             self.cur += 1
             yield batch
+
+    def select(self, total_num):
+        self.total_datasize = total_num
+        self.total_steps = int(self.total_datasize / self.batch_size)
 
 
 def main(args,task_args):
