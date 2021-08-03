@@ -22,8 +22,6 @@ dataset/classification/CoLA/original/raw/in_domain_dev.tsv
 dataset/classification/CoLA/train.tsv
 dataset/classification/CoLA/test.tsv
 dataset/classification/CoLA/dev.tsv
-dataset/__pycache__/Datasets.cpython-37.pyc
-dataset/__pycache__/__init__.cpython-37.pyc
 dataset/classification/CoLA/original/raw/out_of_domain_dev.tsv
 dataset/classification/CoLA/original/tokenized/in_domain_dev.tsv
 dataset/classification/CoLA/original/tokenized/in_domain_train.tsv
@@ -31,7 +29,5 @@ dataset/classification/CoLA/original/tokenized/out_of_domain_dev.tsv
 dataset/mrc/multirc/test.jsonl
 dataset/mrc/multirc/train.jsonl
 dataset/mrc/multirc/val.jsonl
-tokenizers/__pycache__/__init__.cpython-37.pyc
-custom_tokenizers/__pycache__/__init__.cpython-37.pyc
-custom_tokenizers/__pycache__/muppet_tokenizer.cpython-37.pyc
 *.pyc
+*.zip
