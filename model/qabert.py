@@ -1,434 +1,261 @@
-import copy
-import json
-import logging
+# coding=utf-8
+# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
+# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""PyTorch RoBERTa model. """
+
 import math
-import os
-import shutil
-import tarfile
-import tempfile
-import sys
-from io import open
 
 import torch
+import torch.utils.checkpoint
+from packaging import version
 from torch import nn
-from torch.nn import CrossEntropyLoss
-import torch.nn.functional as F
-from torch.nn.utils.weight_norm import weight_norm
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from .utils import PreTrainedModel
-import pdb
-
-logger = logging.getLogger(__name__)
-
-BERT_PRETRAINED_MODEL_ARCHIVE_MAP = {
-    "bert-base-uncased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased-pytorch_model.bin",
-    "bert-large-uncased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-uncased-pytorch_model.bin",
-    "bert-base-cased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-pytorch_model.bin",
-    "bert-large-cased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-cased-pytorch_model.bin",
-    "bert-base-multilingual-uncased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-multilingual-uncased-pytorch_model.bin",
-    "bert-base-multilingual-cased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-multilingual-cased-pytorch_model.bin",
-    "bert-base-chinese": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-chinese-pytorch_model.bin",
-    "bert-base-german-cased": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-german-cased-pytorch_model.bin",
-    "bert-large-uncased-whole-word-masking": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-uncased-whole-word-masking-pytorch_model.bin",
-    "bert-large-cased-whole-word-masking": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-cased-whole-word-masking-pytorch_model.bin",
-    "bert-large-uncased-whole-word-masking-finetuned-squad": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-uncased-whole-word-masking-finetuned-squad-pytorch_model.bin",
-    "bert-large-cased-whole-word-masking-finetuned-squad": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-large-cased-whole-word-masking-finetuned-squad-pytorch_model.bin",
-    "bert-base-cased-finetuned-mrpc": "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-cased-finetuned-mrpc-pytorch_model.bin",
-    "roberta-base": "https://s3.amazonaws.com/models.huggingface.co/bert/roberta-base-pytorch_model.bin",
-    "roberta-large": "https://s3.amazonaws.com/models.huggingface.co/bert/roberta-large-pytorch_model.bin",
-    "roberta-large-mnli": "https://s3.amazonaws.com/models.huggingface.co/bert/roberta-large-mnli-pytorch_model.bin",
-}
-
-
-def load_tf_weights_in_bert(model, tf_checkpoint_path):
-    """ Load tf checkpoints in a pytorch model
-    """
-    try:
-        import re
-        import numpy as np
-        import tensorflow as tf
-    except ImportError:
-        print(
-            "Loading a TensorFlow models in PyTorch, requires TensorFlow to be installed. Please see "
-            "https://www.tensorflow.org/install/ for installation instructions."
-        )
-        raise
-    tf_path = os.path.abspath(tf_checkpoint_path)
-    print("Converting TensorFlow checkpoint from {}".format(tf_path))
-    # Load weights from TF model
-    init_vars = tf.train.list_variables(tf_path)
-    names = []
-    arrays = []
-    for name, shape in init_vars:
-        print("Loading TF weight {} with shape {}".format(name, shape))
-        array = tf.train.load_variable(tf_path, name)
-        names.append(name)
-        arrays.append(array)
-
-    for name, array in zip(names, arrays):
-        name = name.split("/")
-        # adam_v and adam_m are variables used in AdamWeightDecayOptimizer to calculated m and v
-        # which are not required for using pretrained model
-        if any(n in ["adam_v", "adam_m"] for n in name):
-            print("Skipping {}".format("/".join(name)))
-            continue
-        pointer = model
-        for m_name in name:
-            if re.fullmatch(r"[A-Za-z]+_\d+", m_name):
-                l = re.split(r"_(\d+)", m_name)
-            else:
-                l = [m_name]
-            if l[0] == "kernel" or l[0] == "gamma":
-                pointer = getattr(pointer, "weight")
-            elif l[0] == "output_bias" or l[0] == "beta":
-                pointer = getattr(pointer, "bias")
-            elif l[0] == "output_weights":
-                pointer = getattr(pointer, "weight")
-            else:
-                pointer = getattr(pointer, l[0])
-            if len(l) >= 2:
-                num = int(l[1])
-                pointer = pointer[num]
-        if m_name[-11:] == "_embeddings":
-            pointer = getattr(pointer, "weight")
-        elif m_name == "kernel":
-            array = np.transpose(array)
-        try:
-            assert pointer.shape == array.shape
-        except AssertionError as e:
-            e.args += (pointer.shape, array.shape)
-            raise
-        print("Initialize PyTorch weight {}".format(name))
-        pointer.data = torch.from_numpy(array)
-    return model
+from transformers.activations import ACT2FN, gelu
+from transformers.file_utils import (
+    add_code_sample_docstrings,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    replace_return_docstrings,
+)
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPastAndCrossAttentions,
+    BaseModelOutputWithPoolingAndCrossAttentions,
+    CausalLMOutputWithCrossAttentions,
+    MaskedLMOutput,
+    MultipleChoiceModelOutput,
+    QuestionAnsweringModelOutput,
+    SequenceClassifierOutput,
+    TokenClassifierOutput,
+)
+from transformers.modeling_utils import (
+    PreTrainedModel,
+    apply_chunking_to_forward,
+    find_pruneable_heads_and_indices,
+    prune_linear_layer,
+)
+from transformers.utils import logging
+from transformers.models.roberta.configuration_roberta import RobertaConfig
 
 
-def gelu(x):
-    """Implementation of the gelu activation function.
-        For information: OpenAI GPT's gelu is slightly different (and gives slightly different results):
-        0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-        Also see https://arxiv.org/abs/1606.08415
-    """
-    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+logger = logging.get_logger(__name__)
+
+_CHECKPOINT_FOR_DOC = "roberta-base"
+_CONFIG_FOR_DOC = "RobertaConfig"
+_TOKENIZER_FOR_DOC = "RobertaTokenizer"
+
+ROBERTA_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "roberta-base",
+    "roberta-large",
+    "roberta-large-mnli",
+    "distilroberta-base",
+    "roberta-base-openai-detector",
+    "roberta-large-openai-detector",
+    # See all RoBERTa models at https://huggingface.co/models?filter=roberta
+]
 
 
-class GeLU(nn.Module):
-    """Implementation of the gelu activation function.
-        For information: OpenAI GPT's gelu is slightly different (and gives slightly different results):
-        0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-        Also see https://arxiv.org/abs/1606.08415
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return gelu(x)
-
-
-def swish(x):
-    return x * torch.sigmoid(x)
-
-
-ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
-
-
-class BertConfig(object):
-    """Configuration class to store the configuration of a `BertModel`.
-    """
-
-    def __init__(
-        self,
-        vocab_size_or_config_json_file,
-        hidden_size=768,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        intermediate_size=3072,
-        hidden_act="gelu",
-        hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1,
-        max_position_embeddings=512,
-        type_vocab_size=2,
-        initializer_range=0.02,
-        v_feature_size=2048,
-        v_target_size=1601,
-        v_hidden_size=768,
-        v_num_hidden_layers=3,
-        v_num_attention_heads=12,
-        v_intermediate_size=3072,
-        bi_hidden_size=1024,
-        bi_num_attention_heads=16,
-        v_attention_probs_dropout_prob=0.1,
-        v_hidden_act="gelu",
-        v_hidden_dropout_prob=0.1,
-        v_initializer_range=0.2,
-        v_biattention_id=[0, 1],
-        t_biattention_id=[10, 11],
-        visual_target=0,
-        fast_mode=False,
-        fixed_v_layer=0,
-        fixed_t_layer=0,
-        in_batch_pairs=False,
-        fusion_method="mul",
-        dynamic_attention=False,
-        with_coattention=True,
-        objective=0,
-        num_negative=128,
-        model="bert",
-        task_specific_tokens=False,
-        visualization=False,
-    ):
-
-        """Constructs BertConfig.
-        Args:
-            vocab_size_or_config_json_file: Vocabulary size of `inputs_ids` in `BertModel`.
-            hidden_size: Size of the encoder layers and the pooler layer.
-            num_hidden_layers: Number of hidden layers in the Transformer encoder.
-            num_attention_heads: Number of attention heads for each attention layer in
-                the Transformer encoder.
-            intermediate_size: The size of the "intermediate" (i.e., feed-forward)
-                layer in the Transformer encoder.
-            hidden_act: The non-linear activation function (function or string) in the
-                encoder and pooler. If string, "gelu", "relu" and "swish" are supported.
-            hidden_dropout_prob: The dropout probabilitiy for all fully connected
-                layers in the embeddings, encoder, and pooler.
-            attention_probs_dropout_prob: The dropout ratio for the attention
-                probabilities.
-            max_position_embeddings: The maximum sequence length that this model might
-                ever be used with. Typically set this to something large just in case
-                (e.g., 512 or 1024 or 2048).
-            type_vocab_size: The vocabulary size of the `token_type_ids` passed into
-                `BertModel`.
-            initializer_range: The sttdev of the truncated_normal_initializer for
-                initializing all weight matrices.
-        """
-        assert len(v_biattention_id) == len(t_biattention_id)
-        assert max(v_biattention_id) < v_num_hidden_layers
-        assert max(t_biattention_id) < num_hidden_layers
-
-        if isinstance(vocab_size_or_config_json_file, str) or (
-            sys.version_info[0] == 2
-            and isinstance(vocab_size_or_config_json_file, unicode)
-        ):
-            with open(vocab_size_or_config_json_file, "r", encoding="utf-8") as reader:
-                json_config = json.loads(reader.read())
-            for key, value in json_config.items():
-                self.__dict__[key] = value
-        elif isinstance(vocab_size_or_config_json_file, int):
-            self.vocab_size = vocab_size_or_config_json_file
-            self.hidden_size = hidden_size
-            self.num_hidden_layers = num_hidden_layers
-            self.num_attention_heads = num_attention_heads
-            self.hidden_act = hidden_act
-            self.intermediate_size = intermediate_size
-            self.hidden_dropout_prob = hidden_dropout_prob
-            self.attention_probs_dropout_prob = attention_probs_dropout_prob
-            self.max_position_embeddings = max_position_embeddings
-            self.type_vocab_size = type_vocab_size
-            self.initializer_range = initializer_range
-            self.v_feature_size = v_feature_size
-            self.v_hidden_size = v_hidden_size
-            self.v_num_hidden_layers = v_num_hidden_layers
-            self.v_num_attention_heads = v_num_attention_heads
-            self.v_intermediate_size = v_intermediate_size
-            self.v_attention_probs_dropout_prob = v_attention_probs_dropout_prob
-            self.v_hidden_act = v_hidden_act
-            self.v_hidden_dropout_prob = v_hidden_dropout_prob
-            self.v_initializer_range = v_initializer_range
-            self.v_biattention_id = v_biattention_id
-            self.t_biattention_id = t_biattention_id
-            self.v_target_size = v_target_size
-            self.bi_hidden_size = bi_hidden_size
-            self.bi_num_attention_heads = bi_num_attention_heads
-            self.visual_target = visual_target
-            self.fast_mode = fast_mode
-            self.fixed_v_layer = fixed_v_layer
-            self.fixed_t_layer = fixed_t_layer
-
-            self.model = model
-            self.in_batch_pairs = in_batch_pairs
-            self.fusion_method = fusion_method
-            self.dynamic_attention = dynamic_attention
-            self.with_coattention = with_coattention
-            self.objective = objective
-            self.num_negative = num_negative
-            self.task_specific_tokens = task_specific_tokens
-            self.visualization = visualization
-        else:
-            raise ValueError(
-                "First argument must be either a vocabulary size (int)"
-                "or the path to a pretrained model config file (str)"
-            )
-
-    @classmethod
-    def from_dict(cls, json_object):
-        """Constructs a `BertConfig` from a Python dictionary of parameters."""
-        config = BertConfig(vocab_size_or_config_json_file=-1)
-        for key, value in json_object.items():
-            config.__dict__[key] = value
-        return config
-
-    @classmethod
-    def from_json_file(cls, json_file):
-        """Constructs a `BertConfig` from a json file of parameters."""
-        with open(json_file, "r", encoding="utf-8") as reader:
-            text = reader.read()
-        return cls.from_dict(json.loads(text))
-
-    def __repr__(self):
-        return str(self.to_json_string())
-
-    def to_dict(self):
-        """Serializes this instance to a Python dictionary."""
-        output = copy.deepcopy(self.__dict__)
-        return output
-
-    def to_json_string(self):
-        """Serializes this instance to a JSON string."""
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
-
-
-try:
-    from apex.normalization.fused_layer_norm import FusedLayerNorm as BertLayerNorm
-except ImportError:
-    logger.info(
-        "Better speed can be achieved with apex installed from https://www.github.com/nvidia/apex ."
-    )
-
-    class BertLayerNorm(nn.Module):
-        def __init__(self, hidden_size, eps=1e-12):
-            """Construct a layernorm module in the TF style (epsilon inside the square root).
-            """
-            super(BertLayerNorm, self).__init__()
-            self.weight = nn.Parameter(torch.ones(hidden_size))
-            self.bias = nn.Parameter(torch.zeros(hidden_size))
-            self.variance_epsilon = eps
-
-        def forward(self, x):
-            u = x.mean(-1, keepdim=True)
-            s = (x - u).pow(2).mean(-1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.variance_epsilon)
-            return self.weight * x + self.bias
-
-
-class BertEmbeddings(nn.Module):
-    """Construct the embeddings from word, position and token_type embeddings.
-    """
-
-    def __init__(self, config):
-        super(BertEmbeddings, self).__init__()
-
-        self.task_specific_tokens = config.task_specific_tokens
-        self.word_embeddings = nn.Embedding(
-            config.vocab_size, config.hidden_size, padding_idx=0
-        )
-        self.position_embeddings = nn.Embedding(
-            config.max_position_embeddings, config.hidden_size
-        )
-        self.token_type_embeddings = nn.Embedding(
-            config.type_vocab_size, config.hidden_size
-        )
-
-        # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
-        # any TensorFlow checkpoint file
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-        if self.task_specific_tokens:
-            self.task_embeddings = nn.Embedding(20, config.hidden_size)
-
-    def forward(self, input_ids, token_type_ids=None, task_ids=None, position_ids=None):
-
-        seq_length = input_ids.size(1)
-        position_ids = torch.arange(
-            seq_length, dtype=torch.long, device=input_ids.device
-        )
-        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-        words_embeddings = self.word_embeddings(input_ids)
-        position_embeddings = self.position_embeddings(position_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-        embeddings = words_embeddings + position_embeddings + token_type_embeddings
-
-        if self.task_specific_tokens:
-            task_embeddings = self.task_embeddings(task_ids)
-            embeddings = torch.cat(
-                [embeddings[:, 0:1], task_embeddings, embeddings[:, 1:]], dim=1
-            )
-
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-
-        return embeddings
-
-
-class RobertaEmbeddings(BertEmbeddings):
+class RobertaEmbeddings(nn.Module):
     """
     Same as BertEmbeddings with a tiny tweak for positional embeddings indexing.
     """
 
+    # Copied from transformers.models.bert.modeling_bert.BertEmbeddings.__init__
     def __init__(self, config):
-        super(RobertaEmbeddings, self).__init__(config)
-        self.padding_idx = 1
+        super().__init__()
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
-    def forward(self, input_ids, token_type_ids=None, position_ids=None):
-        seq_length = input_ids.size(1)
-        if position_ids is None:
-            # Position numbers begin at padding_idx+1. Padding symbols are ignored.
-            # cf. fairseq's `utils.make_positions`
-            position_ids = torch.arange(
-                self.padding_idx + 1,
-                seq_length + self.padding_idx + 1,
-                dtype=torch.long,
-                device=input_ids.device,
+        # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
+        # any TensorFlow checkpoint file
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        # position_ids (1, len position emb) is contiguous in memory and exported when serialized
+        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+        if version.parse(torch.__version__) > version.parse("1.6.0"):
+            self.register_buffer(
+                "token_type_ids",
+                torch.zeros(self.position_ids.size(), dtype=torch.long, device=self.position_ids.device),
+                persistent=False,
             )
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-        return super(RobertaEmbeddings, self).forward(
-            input_ids, token_type_ids=token_type_ids, position_ids=position_ids
+
+        # End copy
+        self.padding_idx = config.pad_token_id
+        self.position_embeddings = nn.Embedding(
+            config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
+    def forward(
+        self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None, past_key_values_length=0
+    ):
+        if position_ids is None:
+            if input_ids is not None:
+                # Create the position ids from the input token ids. Any padded tokens remain padded.
+                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx, past_key_values_length)
+            else:
+                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
 
-class BertSelfAttention(nn.Module):
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+        if token_type_ids is None:
+            if hasattr(self, "token_type_ids"):
+                buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+    def create_position_ids_from_inputs_embeds(self, inputs_embeds):
+        """
+        We are provided embeddings directly. We cannot infer which are padded so just generate sequential position ids.
+        Args:
+            inputs_embeds: torch.Tensor
+        Returns: torch.Tensor
+        """
+        input_shape = inputs_embeds.size()[:-1]
+        sequence_length = input_shape[1]
+
+        position_ids = torch.arange(
+            self.padding_idx + 1, sequence_length + self.padding_idx + 1, dtype=torch.long, device=inputs_embeds.device
+        )
+        return position_ids.unsqueeze(0).expand(input_shape)
+
+
+# Copied from transformers.models.bert.modeling_bert.BertSelfAttention with Bert->Roberta
+class RobertaSelfAttention(nn.Module):
     def __init__(self, config):
-        super(BertSelfAttention, self).__init__()
-        if config.hidden_size % config.num_attention_heads != 0:
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
-                "The hidden size (%d) is not a multiple of the number of attention "
-                "heads (%d)" % (config.hidden_size, config.num_attention_heads)
+                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
+                f"heads ({config.num_attention_heads})"
             )
+
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        self.visualization = config.visualization
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+            self.max_position_embeddings = config.max_position_embeddings
+            self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
+
+        self.is_decoder = config.is_decoder
 
     def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
         mixed_query_layer = self.query(hidden_states)
-        mixed_key_layer = self.key(hidden_states)
-        mixed_value_layer = self.value(hidden_states)
+
+        # If this is instantiated as a cross-attention module, the keys
+        # and values come from an encoder; the attention mask needs to be
+        # such that the encoder's padding tokens are not attended to.
+        is_cross_attention = encoder_hidden_states is not None
+
+        if is_cross_attention and past_key_value is not None:
+            # reuse k,v, cross_attentions
+            key_layer = past_key_value[0]
+            value_layer = past_key_value[1]
+            attention_mask = encoder_attention_mask
+        elif is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            attention_mask = encoder_attention_mask
+        elif past_key_value is not None:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
+            value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
+        else:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        if self.is_decoder:
+            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
+            # Further calls to cross_attention layer can then reuse all cross-attention
+            # key/value_states (first "if" case)
+            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
+            # all previous decoder key/value_states. Further calls to uni-directional self-attention
+            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
+            # if encoder bi-directional self-attention `past_key_value` is always `None`
+            past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
+            seq_length = hidden_states.size()[1]
+            position_ids_l = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+            position_ids_r = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device).view(1, -1)
+            distance = position_ids_l - position_ids_r
+            positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
+            positional_embedding = positional_embedding.to(dtype=query_layer.dtype)  # fp16 compatibility
+
+            if self.position_embedding_type == "relative_key":
+                relative_position_scores = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                attention_scores = attention_scores + relative_position_scores
+            elif self.position_embedding_type == "relative_key_query":
+                relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query_layer, positional_embedding)
+                relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key_layer, positional_embedding)
+                attention_scores = attention_scores + relative_position_scores_query + relative_position_scores_key
+
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-        attention_scores = attention_scores + attention_mask
+        if attention_mask is not None:
+            # Apply the attention mask is (precomputed for all layers in RobertaModel forward() function)
+            attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -437,28 +264,29 @@ class BertSelfAttention(nn.Module):
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
 
+        # Mask heads if we want to
+        if head_mask is not None:
+            attention_probs = attention_probs * head_mask
+
         context_layer = torch.matmul(attention_probs, value_layer)
+
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
 
-        if self.visualization:
-            attn_data = {
-                "attn": attention_probs,
-                "queries": query_layer,
-                "keys": key_layer,
-            }
-        else:
-            attn_data = None
+        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
-        return context_layer, attn_data
+        if self.is_decoder:
+            outputs = outputs + (past_key_value,)
+        return outputs
 
 
-class BertSelfOutput(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertSelfOutput
+class RobertaSelfOutput(nn.Module):
     def __init__(self, config):
-        super(BertSelfOutput, self).__init__()
+        super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states, input_tensor):
@@ -468,25 +296,62 @@ class BertSelfOutput(nn.Module):
         return hidden_states
 
 
-class BertAttention(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertAttention with Bert->Roberta
+class RobertaAttention(nn.Module):
     def __init__(self, config):
-        super(BertAttention, self).__init__()
-        self.self = BertSelfAttention(config)
-        self.output = BertSelfOutput(config)
+        super().__init__()
+        self.self = RobertaSelfAttention(config)
+        self.output = RobertaSelfOutput(config)
+        self.pruned_heads = set()
 
-    def forward(self, input_tensor, attention_mask):
-        self_output, attention_probs = self.self(input_tensor, attention_mask)
-        attention_output = self.output(self_output, input_tensor)
-        return attention_output, attention_probs
+    def prune_heads(self, heads):
+        if len(heads) == 0:
+            return
+        heads, index = find_pruneable_heads_and_indices(
+            heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
+        )
+
+        # Prune linear layers
+        self.self.query = prune_linear_layer(self.self.query, index)
+        self.self.key = prune_linear_layer(self.self.key, index)
+        self.self.value = prune_linear_layer(self.self.value, index)
+        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
+
+        # Update hyper params and store pruned heads
+        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
+        self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
+        self.pruned_heads = self.pruned_heads.union(heads)
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
+        self_outputs = self.self(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_value,
+            output_attentions,
+        )
+        attention_output = self.output(self_outputs[0], hidden_states)
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
 
 
-class BertIntermediate(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertIntermediate
+class RobertaIntermediate(nn.Module):
     def __init__(self, config):
-        super(BertIntermediate, self).__init__()
+        super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        if isinstance(config.hidden_act, str) or (
-            sys.version_info[0] == 2 and isinstance(config.hidden_act, unicode)
-        ):
+        if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
             self.intermediate_act_fn = config.hidden_act
@@ -497,11 +362,12 @@ class BertIntermediate(nn.Module):
         return hidden_states
 
 
-class BertOutput(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertOutput
+class RobertaOutput(nn.Module):
     def __init__(self, config):
-        super(BertOutput, self).__init__()
+        super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states, input_tensor):
@@ -511,1222 +377,1157 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertLayer(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertLayer with Bert->Roberta
+class RobertaLayer(nn.Module):
     def __init__(self, config):
-        super(BertLayer, self).__init__()
-        self.attention = BertAttention(config)
-        self.intermediate = BertIntermediate(config)
-        self.output = BertOutput(config)
+        super().__init__()
+        self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.attention = RobertaAttention(config)
+        self.is_decoder = config.is_decoder
+        self.add_cross_attention = config.add_cross_attention
+        if self.add_cross_attention:
+            assert self.is_decoder, f"{self} should be used as a decoder model if cross attention is added"
+            self.crossattention = RobertaAttention(config)
+        self.intermediate = RobertaIntermediate(config)
+        self.output = RobertaOutput(config)
 
-    def forward(self, hidden_states, attention_mask):
-        attention_output, attention_probs = self.attention(
-            hidden_states, attention_mask
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
+        # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
+        self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+        self_attention_outputs = self.attention(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            output_attentions=output_attentions,
+            past_key_value=self_attn_past_key_value,
         )
+        attention_output = self_attention_outputs[0]
+
+        # if decoder, the last output is tuple of self-attn cache
+        if self.is_decoder:
+            outputs = self_attention_outputs[1:-1]
+            present_key_value = self_attention_outputs[-1]
+        else:
+            outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        cross_attn_present_key_value = None
+        if self.is_decoder and encoder_hidden_states is not None:
+            assert hasattr(
+                self, "crossattention"
+            ), f"If `encoder_hidden_states` are passed, {self} has to be instantiated with cross-attention layers by setting `config.add_cross_attention=True`"
+
+            # cross_attn cached key/values tuple is at positions 3,4 of past_key_value tuple
+            cross_attn_past_key_value = past_key_value[-2:] if past_key_value is not None else None
+            cross_attention_outputs = self.crossattention(
+                attention_output,
+                attention_mask,
+                head_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                cross_attn_past_key_value,
+                output_attentions,
+            )
+            attention_output = cross_attention_outputs[0]
+            outputs = outputs + cross_attention_outputs[1:-1]  # add cross attentions if we output attention weights
+
+            # add cross-attn cache to positions 3,4 of present_key_value tuple
+            cross_attn_present_key_value = cross_attention_outputs[-1]
+            present_key_value = present_key_value + cross_attn_present_key_value
+
+        layer_output = apply_chunking_to_forward(
+            self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+        )
+        outputs = (layer_output,) + outputs
+
+        # if decoder, return the attn key/values as the last output
+        if self.is_decoder:
+            outputs = outputs + (present_key_value,)
+
+        return outputs
+
+    def feed_forward_chunk(self, attention_output):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
-        return layer_output, attention_probs
+        return layer_output
 
 
-class BertImageSelfAttention(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertEncoder with Bert->Roberta
+class RobertaEncoder(nn.Module):
     def __init__(self, config):
-        super(BertImageSelfAttention, self).__init__()
-        if config.v_hidden_size % config.v_num_attention_heads != 0:
-            raise ValueError(
-                "The hidden size (%d) is not a multiple of the number of attention "
-                "heads (%d)" % (config.v_hidden_size, config.v_num_attention_heads)
-            )
-        self.dynamic_attention = config.dynamic_attention
-        self.num_attention_heads = config.v_num_attention_heads
-        self.attention_head_size = int(
-            config.v_hidden_size / config.v_num_attention_heads
-        )
-
-        self.visualization = config.visualization
-
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-        self.query = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.v_hidden_size, self.all_head_size)
-
-        if self.dynamic_attention:
-            self.dyLinear_q = nn.Linear(config.hidden_size, self.all_head_size)
-            self.dyLinear_k = nn.Linear(config.hidden_size, self.all_head_size)
-
-        self.dropout = nn.Dropout(config.v_attention_probs_dropout_prob)
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
-
-    def forward(self, hidden_states, attention_mask, txt_embedding, txt_attention_mask):
-
-        mixed_query_layer = self.query(hidden_states)
-        mixed_key_layer = self.key(hidden_states)
-        mixed_value_layer = self.value(hidden_states)
-
-        if self.dynamic_attention:
-            pool_embedding = (txt_embedding * txt_attention_mask).sum(1)
-            pool_embedding = pool_embedding / txt_attention_mask.sum(1)
-
-            # given pool embedding, Linear and Sigmoid layer.
-            gate_q = 1 + torch.sigmoid(self.dyLinear_q(pool_embedding))
-            gate_k = 1 + torch.sigmoid(self.dyLinear_k(pool_embedding))
-
-            mixed_query_layer = mixed_query_layer * gate_q.unsqueeze(1)
-            mixed_key_layer = mixed_key_layer * gate_k.unsqueeze(1)
-
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
-
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-        attention_scores = attention_scores + attention_mask
-
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
-
-        if self.visualization:
-            attn_data = {
-                "attn": attention_probs,
-                "queries": query_layer,
-                "keys": key_layer,
-            }
-        else:
-            attn_data = None
-
-        return context_layer, attn_data
-
-
-class BertImageSelfOutput(nn.Module):
-    def __init__(self, config):
-        super(BertImageSelfOutput, self).__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.v_hidden_size)
-        self.LayerNorm = BertLayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.v_hidden_dropout_prob)
-
-    def forward(self, hidden_states, input_tensor):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-class BertImageAttention(nn.Module):
-    def __init__(self, config):
-        super(BertImageAttention, self).__init__()
-        self.self = BertImageSelfAttention(config)
-        self.output = BertImageSelfOutput(config)
-
-    def forward(self, input_tensor, attention_mask, txt_embedding, txt_attention_mask):
-        self_output, attention_probs = self.self(
-            input_tensor, attention_mask, txt_embedding, txt_attention_mask
-        )
-        attention_output = self.output(self_output, input_tensor)
-        return attention_output, attention_probs
-
-
-class BertImageIntermediate(nn.Module):
-    def __init__(self, config):
-        super(BertImageIntermediate, self).__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.v_intermediate_size)
-        if isinstance(config.v_hidden_act, str) or (
-            sys.version_info[0] == 2 and isinstance(config.v_hidden_act, unicode)
-        ):
-            self.intermediate_act_fn = ACT2FN[config.v_hidden_act]
-        else:
-            self.intermediate_act_fn = config.v_hidden_act
-
-    def forward(self, hidden_states):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-        return hidden_states
-
-
-class BertImageOutput(nn.Module):
-    def __init__(self, config):
-        super(BertImageOutput, self).__init__()
-        self.dense = nn.Linear(config.v_intermediate_size, config.v_hidden_size)
-        self.LayerNorm = BertLayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.v_hidden_dropout_prob)
-
-    def forward(self, hidden_states, input_tensor):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
-
-
-class BertImageLayer(nn.Module):
-    def __init__(self, config):
-        super(BertImageLayer, self).__init__()
-        self.attention = BertImageAttention(config)
-        self.intermediate = BertImageIntermediate(config)
-        self.output = BertImageOutput(config)
-
-    def forward(self, hidden_states, attention_mask, txt_embedding, txt_attention_mask):
-        attention_output, attention_probs = self.attention(
-            hidden_states, attention_mask, txt_embedding, txt_attention_mask
-        )
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
-        return layer_output, attention_probs
-
-
-class BertBiAttention(nn.Module):
-    def __init__(self, config):
-        super(BertBiAttention, self).__init__()
-        if config.bi_hidden_size % config.bi_num_attention_heads != 0:
-            raise ValueError(
-                "The hidden size (%d) is not a multiple of the number of attention "
-                "heads (%d)" % (config.bi_hidden_size, config.bi_num_attention_heads)
-            )
-
-        self.visualization = config.visualization
-        self.num_attention_heads = config.bi_num_attention_heads
-        self.attention_head_size = int(
-            config.bi_hidden_size / config.bi_num_attention_heads
-        )
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        # self.scale = nn.Linear(1, self.num_attention_heads, bias=False)
-        # self.scale_act_fn = ACT2FN['relu']
-
-        self.query1 = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.key1 = nn.Linear(config.v_hidden_size, self.all_head_size)
-        self.value1 = nn.Linear(config.v_hidden_size, self.all_head_size)
-        # self.logit1 = nn.Linear(config.hidden_size, self.num_attention_heads)
-
-        self.dropout1 = nn.Dropout(config.v_attention_probs_dropout_prob)
-
-        self.query2 = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key2 = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value2 = nn.Linear(config.hidden_size, self.all_head_size)
-        # self.logit2 = nn.Linear(config.hidden_size, self.num_attention_heads)
-
-        self.dropout2 = nn.Dropout(config.attention_probs_dropout_prob)
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
 
     def forward(
         self,
-        input_tensor1,
-        attention_mask1,
-        input_tensor2,
-        attention_mask2,
-        co_attention_mask=None,
-        use_co_attention_mask=False,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
     ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+        all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
-        # for vision input.
-        mixed_query_layer1 = self.query1(input_tensor1)
-        mixed_key_layer1 = self.key1(input_tensor1)
-        mixed_value_layer1 = self.value1(input_tensor1)
-        # mixed_logit_layer1 = self.logit1(input_tensor1)
+        next_decoder_cache = () if use_cache else None
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
-        query_layer1 = self.transpose_for_scores(mixed_query_layer1)
-        key_layer1 = self.transpose_for_scores(mixed_key_layer1)
-        value_layer1 = self.transpose_for_scores(mixed_value_layer1)
-        # logit_layer1 = self.transpose_for_logits(mixed_logit_layer1)
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+            past_key_value = past_key_values[i] if past_key_values is not None else None
 
-        # for text input:
-        mixed_query_layer2 = self.query2(input_tensor2)
-        mixed_key_layer2 = self.key2(input_tensor2)
-        mixed_value_layer2 = self.value2(input_tensor2)
-        # mixed_logit_layer2 = self.logit2(input_tensor2)
+            if getattr(self.config, "gradient_checkpointing", False) and self.training:
 
-        query_layer2 = self.transpose_for_scores(mixed_query_layer2)
-        key_layer2 = self.transpose_for_scores(mixed_key_layer2)
-        value_layer2 = self.transpose_for_scores(mixed_value_layer2)
-        # logit_layer2 = self.transpose_for_logits(mixed_logit_layer2)
-
-        # Take the dot product between "query2" and "key1" to get the raw attention scores for value 1.
-        attention_scores1 = torch.matmul(query_layer2, key_layer1.transpose(-1, -2))
-        attention_scores1 = attention_scores1 / math.sqrt(self.attention_head_size)
-        attention_scores1 = attention_scores1 + attention_mask1
-        # if use_co_attention_mask:
-        # attention_scores1 = attention_scores1 + co_attention_mask.permute(0,1,3,2)
-
-        # Normalize the attention scores to probabilities.
-        attention_probs1 = nn.Softmax(dim=-1)(attention_scores1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs1 = self.dropout1(attention_probs1)
-
-        context_layer1 = torch.matmul(attention_probs1, value_layer1)
-        context_layer1 = context_layer1.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape1 = context_layer1.size()[:-2] + (self.all_head_size,)
-        context_layer1 = context_layer1.view(*new_context_layer_shape1)
-
-        # Take the dot product between "query1" and "key2" to get the raw attention scores for value 2.
-        attention_scores2 = torch.matmul(query_layer1, key_layer2.transpose(-1, -2))
-        attention_scores2 = attention_scores2 / math.sqrt(self.attention_head_size)
-        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
-
-        # we can comment this line for single flow.
-        attention_scores2 = attention_scores2 + attention_mask2
-        # if use_co_attention_mask:
-        # attention_scores2 = attention_scores2 + co_attention_mask
-
-        # Normalize the attention scores to probabilities.
-        attention_probs2 = nn.Softmax(dim=-1)(attention_scores2)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs2 = self.dropout2(attention_probs2)
-
-        context_layer2 = torch.matmul(attention_probs2, value_layer2)
-        context_layer2 = context_layer2.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape2 = context_layer2.size()[:-2] + (self.all_head_size,)
-        context_layer2 = context_layer2.view(*new_context_layer_shape2)
-
-        attn_data = None
-
-        if self.visualization:
-            attn_data = {
-                "attn1": attention_probs1,
-                "queries1": query_layer2,
-                "keys1": key_layer1,
-                "attn2": attention_probs2,
-                "querues2": query_layer1,
-                "keys2": key_layer2,
-            }
-
-        return context_layer1, context_layer2, attn_data
-
-
-class BertBiOutput(nn.Module):
-    def __init__(self, config):
-        super(BertBiOutput, self).__init__()
-
-        self.dense1 = nn.Linear(config.bi_hidden_size, config.v_hidden_size)
-        self.LayerNorm1 = BertLayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout1 = nn.Dropout(config.v_hidden_dropout_prob)
-
-        self.q_dense1 = nn.Linear(config.bi_hidden_size, config.v_hidden_size)
-        self.q_dropout1 = nn.Dropout(config.v_hidden_dropout_prob)
-
-        self.dense2 = nn.Linear(config.bi_hidden_size, config.hidden_size)
-        self.LayerNorm2 = BertLayerNorm(config.hidden_size, eps=1e-12)
-        self.dropout2 = nn.Dropout(config.hidden_dropout_prob)
-
-        self.q_dense2 = nn.Linear(config.bi_hidden_size, config.hidden_size)
-        self.q_dropout2 = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states1, input_tensor1, hidden_states2, input_tensor2):
-
-        context_state1 = self.dense1(hidden_states1)
-        context_state1 = self.dropout1(context_state1)
-
-        context_state2 = self.dense2(hidden_states2)
-        context_state2 = self.dropout2(context_state2)
-
-        hidden_states1 = self.LayerNorm1(context_state1 + input_tensor1)
-        hidden_states2 = self.LayerNorm2(context_state2 + input_tensor2)
-
-        return hidden_states1, hidden_states2
-
-
-class BertConnectionLayer(nn.Module):
-    def __init__(self, config):
-        super(BertConnectionLayer, self).__init__()
-        self.biattention = BertBiAttention(config)
-
-        self.biOutput = BertBiOutput(config)
-
-        self.v_intermediate = BertImageIntermediate(config)
-        self.v_output = BertImageOutput(config)
-
-        self.t_intermediate = BertIntermediate(config)
-        self.t_output = BertOutput(config)
-
-    def forward(
-        self,
-        input_tensor1,
-        attention_mask1,
-        input_tensor2,
-        attention_mask2,
-        co_attention_mask=None,
-        use_co_attention_mask=False,
-    ):
-
-        bi_output1, bi_output2, co_attention_probs = self.biattention(
-            input_tensor1,
-            attention_mask1,
-            input_tensor2,
-            attention_mask2,
-            co_attention_mask,
-            use_co_attention_mask,
-        )
-
-        attention_output1, attention_output2 = self.biOutput(
-            bi_output2, input_tensor1, bi_output1, input_tensor2
-        )
-
-        intermediate_output1 = self.v_intermediate(attention_output1)
-        layer_output1 = self.v_output(intermediate_output1, attention_output1)
-
-        intermediate_output2 = self.t_intermediate(attention_output2)
-        layer_output2 = self.t_output(intermediate_output2, attention_output2)
-
-        return layer_output1, layer_output2, co_attention_probs
-
-
-class BertEncoder(nn.Module):
-    def __init__(self, config):
-        super(BertEncoder, self).__init__()
-
-        # in the bert encoder, we need to extract three things here.
-        # text bert layer: BertLayer
-        # vision bert layer: BertImageLayer
-        # Bi-Attention: Given the output of two bertlayer, perform bi-directional
-        # attention and add on two layers.
-
-        self.FAST_MODE = config.fast_mode
-        self.with_coattention = config.with_coattention
-        self.v_biattention_id = config.v_biattention_id
-        self.t_biattention_id = config.t_biattention_id
-        self.in_batch_pairs = config.in_batch_pairs
-        self.fixed_t_layer = config.fixed_t_layer
-        self.fixed_v_layer = config.fixed_v_layer
-        layer = BertLayer(config)
-        v_layer = BertImageLayer(config)
-        connect_layer = BertConnectionLayer(config)
-
-        self.layer = nn.ModuleList(
-            [copy.deepcopy(layer) for _ in range(config.num_hidden_layers)]
-        )
-        self.v_layer = nn.ModuleList(
-            [copy.deepcopy(v_layer) for _ in range(config.v_num_hidden_layers)]
-        )
-        self.c_layer = nn.ModuleList(
-            [copy.deepcopy(connect_layer) for _ in range(len(config.v_biattention_id))]
-        )
-
-    def forward(
-        self,
-        txt_embedding,
-        image_embedding,
-        txt_attention_mask,
-        txt_attention_mask2,
-        image_attention_mask,
-        co_attention_mask=None,
-        output_all_encoded_layers=True,
-        output_all_attention_masks=False,
-    ):
-
-        v_start = 0
-        t_start = 0
-        count = 0
-        all_encoder_layers_t = []
-        all_encoder_layers_v = []
-
-        all_attention_mask_t = []
-        all_attnetion_mask_v = []
-        all_attention_mask_c = []
-
-        batch_size, num_words, t_hidden_size = txt_embedding.size()
-        _, num_regions, v_hidden_size = image_embedding.size()
-
-        use_co_attention_mask = False
-        for v_layer_id, t_layer_id in zip(self.v_biattention_id, self.t_biattention_id):
-
-            v_end = v_layer_id
-            t_end = t_layer_id
-
-            assert self.fixed_t_layer <= t_end
-            assert self.fixed_v_layer <= v_end
-
-            for idx in range(t_start, self.fixed_t_layer):
-                with torch.no_grad():
-                    txt_embedding, txt_attention_probs = self.layer[idx](
-                        txt_embedding, txt_attention_mask
+                if use_cache:
+                    logger.warning(
+                        "`use_cache=True` is incompatible with `config.gradient_checkpointing=True`. Setting "
+                        "`use_cache=False`..."
                     )
-                    t_start = self.fixed_t_layer
-                    if output_all_attention_masks:
-                        all_attention_mask_t.append(txt_attention_probs)
+                    use_cache = False
 
-            for idx in range(t_start, t_end):
-                txt_embedding, txt_attention_probs = self.layer[idx](
-                    txt_embedding, txt_attention_mask
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return module(*inputs, past_key_value, output_attentions)
+
+                    return custom_forward
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(layer_module),
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
                 )
-                if output_all_attention_masks:
-                    all_attention_mask_t.append(txt_attention_probs)
-
-            for idx in range(v_start, self.fixed_v_layer):
-                with torch.no_grad():
-                    image_embedding, image_attention_probs = self.v_layer[idx](
-                        image_embedding,
-                        image_attention_mask,
-                        txt_embedding,
-                        txt_attention_mask2,
-                    )
-                    v_start = self.fixed_v_layer
-
-                    if output_all_attention_masks:
-                        all_attnetion_mask_v.append(image_attention_probs)
-
-            for idx in range(v_start, v_end):
-                image_embedding, image_attention_probs = self.v_layer[idx](
-                    image_embedding,
-                    image_attention_mask,
-                    txt_embedding,
-                    txt_attention_mask2,
+            else:
+                layer_outputs = layer_module(
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    past_key_value,
+                    output_attentions,
                 )
 
-                if output_all_attention_masks:
-                    all_attnetion_mask_v.append(image_attention_probs)
+            hidden_states = layer_outputs[0]
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
 
-            if count == 0 and self.in_batch_pairs:
-                # new batch size is the batch_size ^2
-                image_embedding = (
-                    image_embedding.unsqueeze(0)
-                    .expand(batch_size, batch_size, num_regions, v_hidden_size)
-                    .contiguous()
-                    .view(batch_size * batch_size, num_regions, v_hidden_size)
-                )
-                image_attention_mask = (
-                    image_attention_mask.unsqueeze(0)
-                    .expand(batch_size, batch_size, 1, 1, num_regions)
-                    .contiguous()
-                    .view(batch_size * batch_size, 1, 1, num_regions)
-                )
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
-                txt_embedding = (
-                    txt_embedding.unsqueeze(1)
-                    .expand(batch_size, batch_size, num_words, t_hidden_size)
-                    .contiguous()
-                    .view(batch_size * batch_size, num_words, t_hidden_size)
-                )
-                txt_attention_mask = (
-                    txt_attention_mask.unsqueeze(1)
-                    .expand(batch_size, batch_size, 1, 1, num_words)
-                    .contiguous()
-                    .view(batch_size * batch_size, 1, 1, num_words)
-                )
-                co_attention_mask = (
-                    co_attention_mask.unsqueeze(1)
-                    .expand(batch_size, batch_size, 1, num_regions, num_words)
-                    .contiguous()
-                    .view(batch_size * batch_size, 1, num_regions, num_words)
-                )
-
-            if count == 0 and self.FAST_MODE:
-                txt_embedding = txt_embedding.expand(
-                    image_embedding.size(0),
-                    txt_embedding.size(1),
-                    txt_embedding.size(2),
-                )
-                txt_attention_mask = txt_attention_mask.expand(
-                    image_embedding.size(0),
-                    txt_attention_mask.size(1),
-                    txt_attention_mask.size(2),
-                    txt_attention_mask.size(3),
-                )
-
-            if self.with_coattention:
-                # do the bi attention.
-                image_embedding, txt_embedding, co_attention_probs = self.c_layer[
-                    count
-                ](
-                    image_embedding,
-                    image_attention_mask,
-                    txt_embedding,
-                    txt_attention_mask,
-                    co_attention_mask,
-                    use_co_attention_mask,
-                )
-
-                if output_all_attention_masks:
-                    all_attention_mask_c.append(co_attention_probs)
-
-            v_start = v_end
-            t_start = t_end
-            count += 1
-
-            if output_all_encoded_layers:
-                all_encoder_layers_t.append(txt_embedding)
-                all_encoder_layers_v.append(image_embedding)
-
-        for idx in range(v_start, len(self.v_layer)):
-            image_embedding, image_attention_probs = self.v_layer[idx](
-                image_embedding,
-                image_attention_mask,
-                txt_embedding,
-                txt_attention_mask2,
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_decoder_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
+                if v is not None
             )
-
-            if output_all_attention_masks:
-                all_attnetion_mask_v.append(image_attention_probs)
-
-        for idx in range(t_start, len(self.layer)):
-            txt_embedding, txt_attention_probs = self.layer[idx](
-                txt_embedding, txt_attention_mask
-            )
-
-            if output_all_attention_masks:
-                all_attention_mask_t.append(txt_attention_probs)
-
-        # add the end part to finish.
-        if not output_all_encoded_layers:
-            all_encoder_layers_t.append(txt_embedding)
-            all_encoder_layers_v.append(image_embedding)
-
-        return (
-            all_encoder_layers_t,
-            all_encoder_layers_v,
-            (all_attention_mask_t, all_attnetion_mask_v, all_attention_mask_c),
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
         )
 
 
-class BertTextPooler(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertPooler
+class RobertaPooler(nn.Module):
     def __init__(self, config):
-        super(BertTextPooler, self).__init__()
-        self.dense = nn.Linear(config.hidden_size, config.bi_hidden_size)
-        self.activation = nn.ReLU()
-
-    def forward(self, hidden_states):
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
-
-class BertImagePooler(nn.Module):
-    def __init__(self, config):
-        super(BertImagePooler, self).__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.bi_hidden_size)
-        self.activation = nn.ReLU()
-
-    def forward(self, hidden_states):
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        return pooled_output
-
-
-class BertPredictionHeadTransform(nn.Module):
-    def __init__(self, config):
-        super(BertPredictionHeadTransform, self).__init__()
+        super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        if isinstance(config.hidden_act, str) or (
-            sys.version_info[0] == 2 and isinstance(config.hidden_act, unicode)
-        ):
-            self.transform_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.transform_act_fn = config.hidden_act
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.activation = nn.Tanh()
 
     def forward(self, hidden_states):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.transform_act_fn(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states)
-        return hidden_states
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
 
 
-class BertImgPredictionHeadTransform(nn.Module):
-    def __init__(self, config):
-        super(BertImgPredictionHeadTransform, self).__init__()
-        self.dense = nn.Linear(config.v_hidden_size, config.v_hidden_size)
-        if isinstance(config.hidden_act, str) or (
-            sys.version_info[0] == 2 and isinstance(config.hidden_act, unicode)
-        ):
-            self.transform_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.transform_act_fn = config.v_hidden_act
-        self.LayerNorm = BertLayerNorm(config.v_hidden_size, eps=1e-12)
-
-    def forward(self, hidden_states):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.transform_act_fn(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states)
-        return hidden_states
-
-
-class BertLMPredictionHead(nn.Module):
-    def __init__(self, config, bert_model_embedding_weights):
-        super(BertLMPredictionHead, self).__init__()
-        self.transform = BertPredictionHeadTransform(config)
-
-        # The output weights are the same as the input embeddings, but there is
-        # an output-only bias for each token.
-        self.decoder = nn.Linear(
-            bert_model_embedding_weights.size(1),
-            bert_model_embedding_weights.size(0),
-            bias=False,
-        )
-        self.decoder.weight = bert_model_embedding_weights
-        self.bias = nn.Parameter(torch.zeros(bert_model_embedding_weights.size(0)))
-
-    def forward(self, hidden_states):
-        hidden_states = self.transform(hidden_states)
-        hidden_states = self.decoder(hidden_states) + self.bias
-        return hidden_states
-
-
-class BertOnlyMLMHead(nn.Module):
-    def __init__(self, config, bert_model_embedding_weights):
-        super(BertOnlyMLMHead, self).__init__()
-        self.predictions = BertLMPredictionHead(config, bert_model_embedding_weights)
-
-    def forward(self, sequence_output):
-        prediction_scores = self.predictions(sequence_output)
-        return prediction_scores
-
-
-class BertOnlyNSPHead(nn.Module):
-    def __init__(self, config):
-        super(BertOnlyNSPHead, self).__init__()
-        self.seq_relationship = nn.Linear(config.hidden_size, 2)
-
-    def forward(self, pooled_output):
-        seq_relationship_score = self.seq_relationship(pooled_output)
-        return seq_relationship_score
-
-
-class BertPreTrainingHeads(nn.Module):
-    def __init__(self, config, bert_model_embedding_weights):
-        super(BertPreTrainingHeads, self).__init__()
-        self.predictions = BertLMPredictionHead(config, bert_model_embedding_weights)
-        self.bi_seq_relationship = nn.Linear(config.bi_hidden_size, 2)
-        self.imagePredictions = BertImagePredictionHead(config)
-        self.fusion_method = config.fusion_method
-        self.dropout = nn.Dropout(0.1)
-
-    def forward(
-        self, sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v
-    ):
-
-        if self.fusion_method == "sum":
-            pooled_output = self.dropout(pooled_output_t + pooled_output_v)
-        elif self.fusion_method == "mul":
-            pooled_output = self.dropout(pooled_output_t * pooled_output_v)
-        else:
-            assert False
-
-        prediction_scores_t = self.predictions(sequence_output_t)
-        seq_relationship_score = self.bi_seq_relationship(pooled_output)
-        prediction_scores_v = self.imagePredictions(sequence_output_v)
-
-        return prediction_scores_t, prediction_scores_v, seq_relationship_score
-
-
-class BertImagePredictionHead(nn.Module):
-    def __init__(self, config):
-        super(BertImagePredictionHead, self).__init__()
-        self.transform = BertImgPredictionHeadTransform(config)
-
-        # The output weights are the same as the input embeddings, but there is
-        # an output-only bias for each token.
-        self.decoder = nn.Linear(config.v_hidden_size, config.v_target_size)
-
-    def forward(self, hidden_states):
-        hidden_states = self.transform(hidden_states)
-        hidden_states = self.decoder(hidden_states)
-        return hidden_states
-
-
-class BertPreTrainedModel(PreTrainedModel):
-    """ An abstract class to handle weights initialization and
-        a simple interface for dowloading and loading pretrained models.
+class RobertaPreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
     """
 
-    config_class = BertConfig
-    pretrained_model_archive_map = BERT_PRETRAINED_MODEL_ARCHIVE_MAP
-    load_tf_weights = load_tf_weights_in_bert
-    base_model_prefix = "bert"
+    config_class = RobertaConfig
+    base_model_prefix = "roberta"
 
-    def __init__(self, *inputs, **kwargs):
-        super(BertPreTrainedModel, self).__init__(*inputs, **kwargs)
-
-    def init_weights(self, module):
-        """ Initialize the weights.
-        """
-        if isinstance(module, (nn.Linear, nn.Embedding)):
+    # Copied from transformers.models.bert.modeling_bert.BertPreTrainedModel._init_weights
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-        elif isinstance(module, BertLayerNorm):
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
-        if isinstance(module, nn.Linear) and module.bias is not None:
-            module.bias.data.zero_()
+
+    def update_keys_to_ignore(self, config, del_keys_to_ignore):
+        """Remove some keys from ignore list"""
+        if not config.tie_word_embeddings:
+            # must make a new list, or the class variable gets modified!
+            self._keys_to_ignore_on_save = [k for k in self._keys_to_ignore_on_save if k not in del_keys_to_ignore]
+            self._keys_to_ignore_on_load_missing = [
+                k for k in self._keys_to_ignore_on_load_missing if k not in del_keys_to_ignore
+            ]
 
 
-class BertModel(BertPreTrainedModel):
-    def __init__(self, config):
-        super(BertModel, self).__init__(config)
+ROBERTA_START_DOCSTRING = r"""
+    This model inherits from :class:`~transformers.PreTrainedModel`. Check the superclass documentation for the generic
+    methods the library implements for all its model (such as downloading or saving, resizing the input embeddings,
+    pruning heads etc.)
+    This model is also a PyTorch `torch.nn.Module <https://pytorch.org/docs/stable/nn.html#torch.nn.Module>`__
+    subclass. Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to
+    general usage and behavior.
+    Parameters:
+        config (:class:`~transformers.RobertaConfig`): Model configuration class with all the parameters of the
+            model. Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the :meth:`~transformers.PreTrainedModel.from_pretrained` method to load the model
+            weights.
+"""
 
-        # initilize word embedding
-        if config.model == "bert":
-            self.embeddings = BertEmbeddings(config)
-        elif config.model == "roberta":
-            self.embeddings = RobertaEmbeddings(config)
+ROBERTA_INPUTS_DOCSTRING = r"""
+    Args:
+        input_ids (:obj:`torch.LongTensor` of shape :obj:`({0})`):
+            Indices of input sequence tokens in the vocabulary.
+            Indices can be obtained using :class:`~transformers.RobertaTokenizer`. See
+            :meth:`transformers.PreTrainedTokenizer.encode` and :meth:`transformers.PreTrainedTokenizer.__call__` for
+            details.
+            `What are input IDs? <../glossary.html#input-ids>`__
+        attention_mask (:obj:`torch.FloatTensor` of shape :obj:`({0})`, `optional`):
+            Mask to avoid performing attention on padding token indices. Mask values selected in ``[0, 1]``:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+            `What are attention masks? <../glossary.html#attention-mask>`__
+        token_type_ids (:obj:`torch.LongTensor` of shape :obj:`({0})`, `optional`):
+            Segment token indices to indicate first and second portions of the inputs. Indices are selected in ``[0,
+            1]``:
+            - 0 corresponds to a `sentence A` token,
+            - 1 corresponds to a `sentence B` token.
+            `What are token type IDs? <../glossary.html#token-type-ids>`_
+        position_ids (:obj:`torch.LongTensor` of shape :obj:`({0})`, `optional`):
+            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range ``[0,
+            config.max_position_embeddings - 1]``.
+            `What are position IDs? <../glossary.html#position-ids>`_
+        head_mask (:obj:`torch.FloatTensor` of shape :obj:`(num_heads,)` or :obj:`(num_layers, num_heads)`, `optional`):
+            Mask to nullify selected heads of the self-attention modules. Mask values selected in ``[0, 1]``:
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
+        inputs_embeds (:obj:`torch.FloatTensor` of shape :obj:`({0}, hidden_size)`, `optional`):
+            Optionally, instead of passing :obj:`input_ids` you can choose to directly pass an embedded representation.
+            This is useful if you want more control over how to convert :obj:`input_ids` indices into associated
+            vectors than the model's internal embedding lookup matrix.
+        output_attentions (:obj:`bool`, `optional`):
+            Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under returned
+            tensors for more detail.
+        output_hidden_states (:obj:`bool`, `optional`):
+            Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors for
+            more detail.
+        return_dict (:obj:`bool`, `optional`):
+            Whether or not to return a :class:`~transformers.file_utils.ModelOutput` instead of a plain tuple.
+"""
 
-        self.task_specific_tokens = config.task_specific_tokens
 
-        # initlize the vision embedding
-        self.v_embeddings = BertImageEmbeddings(config)
+@add_start_docstrings(
+    "The bare RoBERTa Model transformer outputting raw hidden-states without any specific head on top.",
+    ROBERTA_START_DOCSTRING,
+)
+class RobertaModel(RobertaPreTrainedModel):
+    """
+    The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
+    cross-attention is added between the self-attention layers, following the architecture described in `Attention is
+    all you need`_ by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz
+    Kaiser and Illia Polosukhin.
+    To behave as an decoder the model needs to be initialized with the :obj:`is_decoder` argument of the configuration
+    set to :obj:`True`. To be used in a Seq2Seq model, the model needs to initialized with both :obj:`is_decoder`
+    argument and :obj:`add_cross_attention` set to :obj:`True`; an :obj:`encoder_hidden_states` is then expected as an
+    input to the forward pass.
+    .. _`Attention is all you need`: https://arxiv.org/abs/1706.03762
+    """
 
-        self.encoder = BertEncoder(config)
-        self.t_pooler = BertTextPooler(config)
-        self.v_pooler = BertImagePooler(config)
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
 
-        self.apply(self.init_weights)
+    # Copied from transformers.models.bert.modeling_bert.BertModel.__init__ with Bert->Roberta
+    def __init__(self, config, add_pooling_layer=True):
+        super().__init__(config)
+        self.config = config
 
+        self.embeddings = RobertaEmbeddings(config)
+        self.encoder = RobertaEncoder(config)
+
+        self.pooler = RobertaPooler(config) if add_pooling_layer else None
+
+        self.init_weights()
+
+    def get_input_embeddings(self):
+        return self.embeddings.word_embeddings
+
+    def set_input_embeddings(self, value):
+        self.embeddings.word_embeddings = value
+
+    def _prune_heads(self, heads_to_prune):
+        """
+        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
+        class PreTrainedModel
+        """
+        for layer, heads in heads_to_prune.items():
+            self.encoder.layer[layer].attention.prune_heads(heads)
+
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=BaseModelOutputWithPoolingAndCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    # Copied from transformers.models.bert.modeling_bert.BertModel.forward
     def forward(
         self,
-        input_txt,
-        input_imgs,
-        image_loc,
-        token_type_ids=None,
+        input_ids=None,
         attention_mask=None,
-        image_attention_mask=None,
-        co_attention_mask=None,
-        task_ids=None,
-        output_all_encoded_layers=False,
-        output_all_attention_masks=False,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ):
+        r"""
+        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+            Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
+            the model is configured as a decoder.
+        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
+            the cross-attention if the model is configured as a decoder. Mask values selected in ``[0, 1]``:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+        past_key_values (:obj:`tuple(tuple(torch.FloatTensor))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
+            Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
+            If :obj:`past_key_values` are used, the user can optionally input only the last :obj:`decoder_input_ids`
+            (those that don't have their past key value states given to this model) of shape :obj:`(batch_size, 1)`
+            instead of all :obj:`decoder_input_ids` of shape :obj:`(batch_size, sequence_length)`.
+        use_cache (:obj:`bool`, `optional`):
+            If set to :obj:`True`, :obj:`past_key_values` key value states are returned and can be used to speed up
+            decoding (see :obj:`past_key_values`).
+        """
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if self.config.is_decoder:
+            use_cache = use_cache if use_cache is not None else self.config.use_cache
+        else:
+            use_cache = False
+
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        elif input_ids is not None:
+            input_shape = input_ids.size()
+            batch_size, seq_length = input_shape
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
+            batch_size, seq_length = input_shape
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        # past_key_values_length
+        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_txt)
+            attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
+
         if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_txt)
-        if image_attention_mask is None:
-            image_attention_mask = torch.ones(
-                input_imgs.size(0), input_imgs.size(1)
-            ).type_as(input_txt)
+            if hasattr(self.embeddings, "token_type_ids"):
+                buffered_token_type_ids = self.embeddings.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(batch_size, seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
 
-        if self.task_specific_tokens:
-            # extend the mask
-            mask_tokens = input_txt.new().resize_(input_txt.size(0), 1).fill_(1)
-            attention_mask = torch.cat([mask_tokens, attention_mask], dim=1)
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
 
-        # We create a 3D attention mask from a 2D tensor mask.
-        # Sizes are [batch_size, 1, 1, to_seq_length]
-        # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
-        # this attention mask is more simple than the triangular masking of causal attention
-        # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-        extended_image_attention_mask = image_attention_mask.unsqueeze(1).unsqueeze(2)
+        # If a 2D or 3D attention mask is provided for the cross-attention
+        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        if self.config.is_decoder and encoder_hidden_states is not None:
+            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
+            if encoder_attention_mask is None:
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+        else:
+            encoder_extended_attention_mask = None
 
-        extended_attention_mask2 = attention_mask.unsqueeze(2)
-        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
-        # masked positions, this operation will create a tensor which is 0.0 for
-        # positions we want to attend and -10000.0 for masked positions.
-        # Since we are adding it to the raw scores before the softmax, this is
-        # effectively the same as removing these entirely.
-        extended_attention_mask = extended_attention_mask.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
-        extended_attention_mask2 = extended_attention_mask2.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
-
-        extended_image_attention_mask = extended_image_attention_mask.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
-        extended_image_attention_mask = (1.0 - extended_image_attention_mask) * -10000.0
-
-        if co_attention_mask is None:
-            co_attention_mask = torch.zeros(
-                input_txt.size(0), input_imgs.size(1), input_txt.size(1)
-            ).type_as(extended_image_attention_mask)
-
-        extended_co_attention_mask = co_attention_mask.unsqueeze(1)
-
-        # extended_co_attention_mask = co_attention_mask.unsqueeze(-1)
-        extended_co_attention_mask = extended_co_attention_mask * 5.0
-        extended_co_attention_mask = extended_co_attention_mask.to(
-            dtype=next(self.parameters()).dtype
-        )  # fp16 compatibility
-
-        embedding_output = self.embeddings(input_txt, token_type_ids, task_ids)
-        v_embedding_output = self.v_embeddings(input_imgs, image_loc)
-        encoded_layers_t, encoded_layers_v, all_attention_mask = self.encoder(
+        embedding_output = self.embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+            past_key_values_length=past_key_values_length,
+        )
+        encoder_outputs = self.encoder(
             embedding_output,
-            v_embedding_output,
-            extended_attention_mask,
-            extended_attention_mask2,
-            extended_image_attention_mask,
-            extended_co_attention_mask,
-            output_all_encoded_layers=output_all_encoded_layers,
-            output_all_attention_masks=output_all_attention_masks,
+            attention_mask=extended_attention_mask,
+            head_mask=head_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_extended_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = encoder_outputs[0]
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+
+        if not return_dict:
+            return (sequence_output, pooled_output) + encoder_outputs[1:]
+
+        return BaseModelOutputWithPoolingAndCrossAttentions(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+            past_key_values=encoder_outputs.past_key_values,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+            cross_attentions=encoder_outputs.cross_attentions,
         )
 
-        sequence_output_t = encoded_layers_t[-1]
-        sequence_output_v = encoded_layers_v[-1]
 
-        pooled_output_t = self.t_pooler(sequence_output_t)
-        pooled_output_v = self.v_pooler(sequence_output_v)
-
-        if not output_all_encoded_layers:
-            encoded_layers_t = encoded_layers_t[-1]
-            encoded_layers_v = encoded_layers_v[-1]
-
-        return (
-            encoded_layers_t,
-            encoded_layers_v,
-            pooled_output_t,
-            pooled_output_v,
-            all_attention_mask,
-        )
-
-
-class BertImageEmbeddings(nn.Module):
-    """Construct the embeddings from image, spatial location (omit now) and token_type embeddings.
-    """
+@add_start_docstrings(
+    """RoBERTa Model with a `language modeling` head on top for CLM fine-tuning. """, ROBERTA_START_DOCSTRING
+)
+class RobertaForCausalLM(RobertaPreTrainedModel):
+    _keys_to_ignore_on_save = [r"lm_head.decoder.weight", r"lm_head.decoder.bias"]
+    _keys_to_ignore_on_load_missing = [r"position_ids", r"lm_head.decoder.weight", r"lm_head.decoder.bias"]
+    _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
     def __init__(self, config):
-        super(BertImageEmbeddings, self).__init__()
+        super().__init__(config)
 
-        self.image_embeddings = nn.Linear(config.v_feature_size, config.v_hidden_size)
-        self.image_location_embeddings = nn.Linear(5, config.v_hidden_size)
-        self.LayerNorm = BertLayerNorm(config.v_hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        if not config.is_decoder:
+            logger.warning("If you want to use `RobertaLMHeadModel` as a standalone, add `is_decoder=True.`")
 
-    def forward(self, input_ids, input_loc):
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.lm_head = RobertaLMHead(config)
 
-        img_embeddings = self.image_embeddings(input_ids)
-        loc_embeddings = self.image_location_embeddings(input_loc)
+        # The LM head weights require special treatment only when they are tied with the word embeddings
+        self.update_keys_to_ignore(config, ["lm_head.decoder.weight"])
 
-        # TODO: we want to make the padding_idx == 0, however, with custom initilization, it seems it will have a bias.
-        # Let's do masking for now
-        embeddings = self.LayerNorm(img_embeddings + loc_embeddings)
-        # embeddings = self.LayerNorm(img_embeddings+loc_embeddings)
-        embeddings = self.dropout(embeddings)
+        self.init_weights()
 
-        return embeddings
+    def get_output_embeddings(self):
+        return self.lm_head.decoder
 
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head.decoder = new_embeddings
 
-class BertForMultiModalPreTraining(BertPreTrainedModel):
-    """BERT model with multi modal pre-training heads.
-    """
-
-    def __init__(self, config):
-        super(BertForMultiModalPreTraining, self).__init__(config)
-
-        self.bert = BertModel(config)
-        self.cls = BertPreTrainingHeads(
-            config, self.bert.embeddings.word_embeddings.weight
-        )
-
-        self.apply(self.init_weights)
-        self.visual_target = config.visual_target
-        self.num_negative = config.num_negative
-        self.loss_fct = CrossEntropyLoss(ignore_index=-1)
-
-        print("model's visual target is ", config.visual_target)
-
-        if self.visual_target == 0:
-            self.vis_criterion = nn.KLDivLoss(reduction="none")
-        elif self.visual_target == 1:
-            self.vis_criterion = nn.MSELoss(reduction="none")
-        elif self.visual_target == 2:
-            self.vis_criterion = CrossEntropyLoss()
-
-        self.tie_weights()
-
-    def tie_weights(self):
-        """ Make sure we are sharing the input and output embeddings.
-            Export to TorchScript can't handle parameter sharing so we are cloning them instead.
-        """
-        self._tie_or_clone_weights(
-            self.cls.predictions.decoder, self.bert.embeddings.word_embeddings
-        )
-
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @replace_return_docstrings(output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
-        input_ids,
-        image_feat,
-        image_loc,
-        token_type_ids=None,
+        input_ids=None,
         attention_mask=None,
-        image_attention_mask=None,
-        masked_lm_labels=None,
-        image_label=None,
-        image_target=None,
-        next_sentence_label=None,
-        output_all_attention_masks=False,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ):
-        # in this model, we first embed the images.
-        sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v, all_attention_mask = self.bert(
+        r"""
+        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+            Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
+            the model is configured as a decoder.
+        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
+            the cross-attention if the model is configured as a decoder. Mask values selected in ``[0, 1]``:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the left-to-right language modeling loss (next word prediction). Indices should be in
+            ``[-100, 0, ..., config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are
+            ignored (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``
+        past_key_values (:obj:`tuple(tuple(torch.FloatTensor))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
+            Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
+            If :obj:`past_key_values` are used, the user can optionally input only the last :obj:`decoder_input_ids`
+            (those that don't have their past key value states given to this model) of shape :obj:`(batch_size, 1)`
+            instead of all :obj:`decoder_input_ids` of shape :obj:`(batch_size, sequence_length)`.
+        use_cache (:obj:`bool`, `optional`):
+            If set to :obj:`True`, :obj:`past_key_values` key value states are returned and can be used to speed up
+            decoding (see :obj:`past_key_values`).
+        Returns:
+        Example::
+            >>> from transformers import RobertaTokenizer, RobertaForCausalLM, RobertaConfig
+            >>> import torch
+            >>> tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+            >>> config = RobertaConfig.from_pretrained("roberta-base")
+            >>> config.is_decoder = True
+            >>> model = RobertaForCausalLM.from_pretrained('roberta-base', config=config)
+            >>> inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
+            >>> outputs = model(**inputs)
+            >>> prediction_logits = outputs.logits
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        if labels is not None:
+            use_cache = False
+
+        outputs = self.roberta(
             input_ids,
-            image_feat,
-            image_loc,
-            token_type_ids,
-            attention_mask,
-            image_attention_mask,
-            output_all_encoded_layers=False,
-            output_all_attention_masks=output_all_attention_masks,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
 
-        prediction_scores_t, prediction_scores_v, seq_relationship_score = self.cls(
-            sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v
+        sequence_output = outputs[0]
+        prediction_scores = self.lm_head(sequence_output)
+
+        lm_loss = None
+        if labels is not None:
+            # we are doing next-token prediction; shift prediction scores and input ids by one
+            shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
+            labels = labels[:, 1:].contiguous()
+            loss_fct = CrossEntropyLoss()
+            lm_loss = loss_fct(shifted_prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return ((lm_loss,) + output) if lm_loss is not None else output
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=lm_loss,
+            logits=prediction_scores,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            cross_attentions=outputs.cross_attentions,
         )
 
-        if (
-            masked_lm_labels is not None
-            and next_sentence_label is not None
-            and image_target is not None
-        ):
-            prediction_scores_v = prediction_scores_v[:, 1:]
-            if self.visual_target == 1:
-                img_loss = self.vis_criterion(prediction_scores_v, image_target)
-                masked_img_loss = torch.sum(
-                    img_loss * (image_label == 1).unsqueeze(2).float()
-                ) / max(
-                    torch.sum((image_label == 1).unsqueeze(2).expand_as(img_loss)), 1
-                )
+    def prepare_inputs_for_generation(self, input_ids, past=None, attention_mask=None, **model_kwargs):
+        input_shape = input_ids.shape
+        # if model is used as a decoder in encoder-decoder model, the decoder attention mask is created on the fly
+        if attention_mask is None:
+            attention_mask = input_ids.new_ones(input_shape)
 
-            elif self.visual_target == 0:
-                img_loss = self.vis_criterion(
-                    F.log_softmax(prediction_scores_v, dim=2), image_target
-                )
+        # cut decoder_input_ids if past is used
+        if past is not None:
+            input_ids = input_ids[:, -1:]
 
-                masked_img_loss = torch.sum(
-                    img_loss * (image_label == 1).unsqueeze(2).float()
-                ) / max(torch.sum((image_label == 1)), 0)
-            elif self.visual_target == 2:
-                # generate negative sampled index.
-                num_negative = self.num_negative
-                num_across_batch = int(self.num_negative * 0.7)
-                num_inside_batch = int(self.num_negative * 0.3)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "past_key_values": past}
 
-                batch_size, num_regions, _ = prediction_scores_v.size()
-                assert batch_size != 0
-                # random negative across batches.
-                row_across_index = input_ids.new(
-                    batch_size, num_regions, num_across_batch
-                ).random_(0, batch_size - 1)
-                col_across_index = input_ids.new(
-                    batch_size, num_regions, num_across_batch
-                ).random_(0, num_regions)
+    def _reorder_cache(self, past, beam_idx):
+        reordered_past = ()
+        for layer_past in past:
+            reordered_past += (tuple(past_state.index_select(0, beam_idx) for past_state in layer_past),)
+        return reordered_past
 
-                for i in range(batch_size - 1):
-                    row_across_index[i][row_across_index[i] == i] = batch_size - 1
-                final_across_index = row_across_index * num_regions + col_across_index
 
-                # random negative inside batches.
-                row_inside_index = input_ids.new(
-                    batch_size, num_regions, num_inside_batch
-                ).zero_()
-                col_inside_index = input_ids.new(
-                    batch_size, num_regions, num_inside_batch
-                ).random_(0, num_regions - 1)
+@add_start_docstrings("""RoBERTa Model with a `language modeling` head on top. """, ROBERTA_START_DOCSTRING)
+class RobertaForMaskedLM(RobertaPreTrainedModel):
+    _keys_to_ignore_on_save = [r"lm_head.decoder.weight", r"lm_head.decoder.bias"]
+    _keys_to_ignore_on_load_missing = [r"position_ids", r"lm_head.decoder.weight", r"lm_head.decoder.bias"]
+    _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
-                for i in range(batch_size):
-                    row_inside_index[i] = i
-                for i in range(num_regions - 1):
-                    col_inside_index[:, i, :][col_inside_index[:, i, :] == i] = (
-                        num_regions - 1
-                    )
-                final_inside_index = row_inside_index * num_regions + col_inside_index
+    def __init__(self, config):
+        super().__init__(config)
 
-                final_index = torch.cat((final_across_index, final_inside_index), dim=2)
-
-                # Let's first sample where we need to compute.
-                predict_v = prediction_scores_v[image_label == 1]
-                neg_index_v = final_index[image_label == 1]
-
-                flat_image_target = image_target.view(batch_size * num_regions, -1)
-                # we also need to append the target feature at the begining.
-                negative_v = flat_image_target[neg_index_v]
-                positive_v = image_target[image_label == 1]
-                sample_v = torch.cat((positive_v.unsqueeze(1), negative_v), dim=1)
-
-                # calculate the loss.
-                score = torch.bmm(sample_v, predict_v.unsqueeze(2)).squeeze(2)
-                masked_img_loss = self.vis_criterion(
-                    score, input_ids.new(score.size(0)).zero_()
-                )
-
-            # masked_img_loss = torch.sum(img_loss) / (img_loss.shape[0] * img_loss.shape[1])
-            masked_lm_loss = self.loss_fct(
-                prediction_scores_t.view(-1, self.config.vocab_size),
-                masked_lm_labels.view(-1),
+        if config.is_decoder:
+            logger.warning(
+                "If you want to use `RobertaForMaskedLM` make sure `config.is_decoder=False` for "
+                "bi-directional self-attention."
             )
 
-            next_sentence_loss = self.loss_fct(
-                seq_relationship_score.view(-1, 2), next_sentence_label.view(-1)
-            )
-            return (
-                masked_lm_loss.unsqueeze(0),
-                masked_img_loss.unsqueeze(0),
-                next_sentence_loss.unsqueeze(0),
-            )
-        else:
-            return (
-                prediction_scores_t,
-                prediction_scores_v,
-                seq_relationship_score,
-                all_attention_mask,
-            )
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.lm_head = RobertaLMHead(config)
 
+        # The LM head weights require special treatment only when they are tied with the word embeddings
+        self.update_keys_to_ignore(config, ["lm_head.decoder.weight"])
 
-class VILBertForVLTasks(BertPreTrainedModel):
-    def __init__(self, config, num_labels, dropout_prob=0.1, default_gpu=True):
-        super(VILBertForVLTasks, self).__init__(config)
-        self.num_labels = num_labels
+        self.init_weights()
 
-        self.bert = BertModel(config)
-        self.dropout = nn.Dropout(dropout_prob)
-        self.cls = BertPreTrainingHeads(
-            config, self.bert.embeddings.word_embeddings.weight
-        )
-        self.vil_prediction = SimpleClassifier(
-            config.bi_hidden_size, config.bi_hidden_size * 2, 3129, 0.5
-        )
-        self.vil_prediction_gqa = SimpleClassifier(
-            config.bi_hidden_size, config.bi_hidden_size * 2, 1533, 0.5
-        )
-        self.vil_binary_prediction = SimpleClassifier(
-            config.bi_hidden_size * 2, config.bi_hidden_size * 2, 2, 0.5
-        )
-        self.vil_logit = nn.Linear(config.bi_hidden_size, 1)
-        self.vil_tri_prediction = nn.Linear(
-            config.bi_hidden_size, 3
-        )  # for Visual Entailiment tasks
-        self.vision_logit = nn.Linear(config.v_hidden_size, 1)
-        self.linguisic_logit = nn.Linear(config.hidden_size, 1)
-        self.fusion_method = config.fusion_method
-        self.apply(self.init_weights)
+    def get_output_embeddings(self):
+        return self.lm_head.decoder
 
-        self.tie_weights()
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head.decoder = new_embeddings
 
-    def tie_weights(self):
-        """ Make sure we are sharing the input and output embeddings.
-            Export to TorchScript can't handle parameter sharing so we are cloning them instead.
-        """
-        self._tie_or_clone_weights(
-            self.cls.predictions.decoder, self.bert.embeddings.word_embeddings
-        )
-
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=MaskedLMOutput,
+        config_class=_CONFIG_FOR_DOC,
+        mask="<mask>",
+    )
     def forward(
         self,
-        input_txt,
-        input_imgs,
-        image_loc,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss. Indices should be in ``[-100, 0, ...,
+            config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are ignored
+            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``
+        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
+            Used to hide legacy arguments that have been deprecated.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        prediction_scores = self.lm_head(sequence_output)
+
+        masked_lm_loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+
+        if not return_dict:
+            output = (prediction_scores,) + outputs[2:]
+            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+        return MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class RobertaLMHead(nn.Module):
+    """Roberta Head for masked language modeling."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+
+        # Need a link between the two variables so that the bias is correctly resized with `resize_token_embeddings`
+        self.decoder.bias = self.bias
+
+    def forward(self, features, **kwargs):
+        x = self.dense(features)
+        x = gelu(x)
+        x = self.layer_norm(x)
+
+        # project back to size of vocabulary with bias
+        x = self.decoder(x)
+
+        return x
+
+
+@add_start_docstrings(
+    """
+    RoBERTa Model transformer with a sequence classification/regression head on top (a linear layer on top of the
+    pooled output) e.g. for GLUE tasks.
+    """,
+    ROBERTA_START_DOCSTRING,
+)
+class RobertaForSequenceClassification(RobertaPreTrainedModel):
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.classifier = RobertaClassificationHead(config)
+
+        self.init_weights()
+
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=SequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[0, ...,
+            config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
+            If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        logits = self.classifier(sequence_output)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+@add_start_docstrings(
+    """
+    Roberta Model with a multiple choice classification head on top (a linear layer on top of the pooled output and a
+    softmax) e.g. for RocStories/SWAG tasks.
+    """,
+    ROBERTA_START_DOCSTRING,
+)
+class RobertaForMultipleChoice(RobertaPreTrainedModel):
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.roberta = RobertaModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+
+        self.init_weights()
+
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=MultipleChoiceModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        input_ids=None,
         token_type_ids=None,
         attention_mask=None,
-        image_attention_mask=None,
-        co_attention_mask=None,
-        task_ids=None,
-        output_all_encoded_layers=False,
-        output_all_attention_masks=False,
+        labels=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the multiple choice classification loss. Indices should be in ``[0, ...,
+            num_choices-1]`` where :obj:`num_choices` is the size of the second dimension of the input tensors. (See
+            :obj:`input_ids` above)
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        num_choices = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
 
-        sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v, all_attention_mask = self.bert(
-            input_txt,
-            input_imgs,
-            image_loc,
-            token_type_ids,
-            attention_mask,
-            image_attention_mask,
-            co_attention_mask,
-            task_ids,
-            output_all_encoded_layers=output_all_encoded_layers,
-            output_all_attention_masks=output_all_attention_masks,
+        flat_input_ids = input_ids.view(-1, input_ids.size(-1)) if input_ids is not None else None
+        flat_position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        flat_token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        flat_attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        flat_inputs_embeds = (
+            inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+            if inputs_embeds is not None
+            else None
         )
 
-        vil_prediction = 0
-        vil_logit = 0
-        vil_binary_prediction = 0
-        vision_prediction = 0
-        vision_logit = 0
-        linguisic_prediction = 0
-        linguisic_logit = 0
-
-        linguisic_prediction, vision_prediction, vil_binary_prediction = self.cls(
-            sequence_output_t, sequence_output_v, pooled_output_t, pooled_output_v
+        outputs = self.roberta(
+            flat_input_ids,
+            position_ids=flat_position_ids,
+            token_type_ids=flat_token_type_ids,
+            attention_mask=flat_attention_mask,
+            head_mask=head_mask,
+            inputs_embeds=flat_inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
+        pooled_output = outputs[1]
 
-        if self.fusion_method == "sum":
-            pooled_output = self.dropout(pooled_output_t + pooled_output_v)
-        elif self.fusion_method == "mul":
-            pooled_output = self.dropout(pooled_output_t * pooled_output_v)
-        else:
-            assert False
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+        reshaped_logits = logits.view(-1, num_choices)
 
-        vil_prediction = self.vil_prediction(pooled_output)
-        vil_prediction_gqa = self.vil_prediction_gqa(pooled_output)
-        if pooled_output.size(0) % 2 == 0:
-            vil_binary_prediction = self.vil_binary_prediction(
-                pooled_output.view(-1, pooled_output.size(1) * 2)
-            )
-        vil_logit = self.vil_logit(pooled_output)
-        vil_tri_prediction = self.vil_tri_prediction(pooled_output)
-        vision_logit = self.vision_logit(self.dropout(sequence_output_v)) + (
-            (1.0 - image_attention_mask) * -10000.0
-        ).unsqueeze(2).to(dtype=next(self.parameters()).dtype)
-        linguisic_logit = self.linguisic_logit(self.dropout(sequence_output_t))
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
 
-        return (
-            vil_prediction,
-            vil_prediction_gqa,
-            vil_logit,
-            vil_binary_prediction,
-            vil_tri_prediction,
-            vision_prediction,
-            vision_logit,
-            linguisic_prediction,
-            linguisic_logit,
-            all_attention_mask,
+        if not return_dict:
+            output = (reshaped_logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return MultipleChoiceModelOutput(
+            loss=loss,
+            logits=reshaped_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
 
 
-class SimpleClassifier(nn.Module):
-    def __init__(self, in_dim, hid_dim, out_dim, dropout):
+@add_start_docstrings(
+    """
+    Roberta Model with a token classification head on top (a linear layer on top of the hidden-states output) e.g. for
+    Named-Entity-Recognition (NER) tasks.
+    """,
+    ROBERTA_START_DOCSTRING,
+)
+class RobertaForTokenClassification(RobertaPreTrainedModel):
+    _keys_to_ignore_on_load_unexpected = [r"pooler"]
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.init_weights()
+
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=TokenClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the token classification loss. Indices should be in ``[0, ..., config.num_labels -
+            1]``.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = outputs[0]
+
+        sequence_output = self.dropout(sequence_output)
+        logits = self.classifier(sequence_output)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            # Only keep active parts of the loss
+            if attention_mask is not None:
+                active_loss = attention_mask.view(-1) == 1
+                active_logits = logits.view(-1, self.num_labels)
+                active_labels = torch.where(
+                    active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
+                )
+                loss = loss_fct(active_logits, active_labels)
+            else:
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class RobertaClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(self, config):
         super().__init__()
-        self.logit_fc = nn.Sequential(
-            nn.Linear(in_dim, hid_dim),
-            GeLU(),
-            BertLayerNorm(hid_dim, eps=1e-12),
-            nn.Linear(hid_dim, out_dim),
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, features, **kwargs):
+        x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
+
+
+@add_start_docstrings(
+    """
+    Roberta Model with a span classification head on top for extractive question-answering tasks like SQuAD (a linear
+    layers on top of the hidden-states output to compute `span start logits` and `span end logits`).
+    """,
+    ROBERTA_START_DOCSTRING,
+)
+class RobertaForQuestionAnswering(RobertaPreTrainedModel):
+    _keys_to_ignore_on_load_unexpected = [r"pooler"]
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+
+        self.roberta = RobertaModel(config, add_pooling_layer=False)
+        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.init_weights()
+
+    @add_start_docstrings_to_model_forward(ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        tokenizer_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=QuestionAnsweringModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        start_positions=None,
+        end_positions=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        start_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for position (index) of the start of the labelled span for computing the token classification loss.
+            Positions are clamped to the length of the sequence (:obj:`sequence_length`). Position outside of the
+            sequence are not taken into account for computing the loss.
+        end_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for position (index) of the end of the labelled span for computing the token classification loss.
+            Positions are clamped to the length of the sequence (:obj:`sequence_length`). Position outside of the
+            sequence are not taken into account for computing the loss.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
 
-    def forward(self, hidden_states):
-        return self.logit_fc(hidden_states)
+        sequence_output = outputs[0]
+
+        logits = self.qa_outputs(sequence_output)
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1).contiguous()
+        end_logits = end_logits.squeeze(-1).contiguous()
+
+        total_loss = None
+        if start_positions is not None and end_positions is not None:
+            # If we are on multi-GPU, split add a dimension
+            if len(start_positions.size()) > 1:
+                start_positions = start_positions.squeeze(-1)
+            if len(end_positions.size()) > 1:
+                end_positions = end_positions.squeeze(-1)
+            # sometimes the start/end positions are outside our model inputs, we ignore these terms
+            ignored_index = start_logits.size(1)
+            start_positions = start_positions.clamp(0, ignored_index)
+            end_positions = end_positions.clamp(0, ignored_index)
+
+            loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+            start_loss = loss_fct(start_logits, start_positions)
+            end_loss = loss_fct(end_logits, end_positions)
+            total_loss = (start_loss + end_loss) / 2
+
+        if not return_dict:
+            output = (start_logits, end_logits) + outputs[2:]
+            return ((total_loss,) + output) if total_loss is not None else output
+
+        return QuestionAnsweringModelOutput(
+            loss=total_loss,
+            start_logits=start_logits,
+            end_logits=end_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
-# class SimpleClassifier(nn.Module):
-#     def __init__(self, in_dim, hid_dim, out_dim, dropout):
-#         super(SimpleClassifier, self).__init__()
-#         layers = [
-#             weight_norm(nn.Linear(in_dim, hid_dim), dim=None),
-#             nn.ReLU(),
-#             nn.Dropout(dropout, inplace=True),
-#             weight_norm(nn.Linear(hid_dim, out_dim), dim=None)
-#         ]
-#         self.main = nn.Sequential(*layers)
-
-#     def forward(self, x):
-#         logits = self.main(x)
-#         return logits 
+def create_position_ids_from_input_ids(input_ids, padding_idx, past_key_values_length=0):
+    """
+    Replace non-padding symbols with their position numbers. Position numbers begin at padding_idx+1. Padding symbols
+    are ignored. This is modified from fairseq's `utils.make_positions`.
+    Args:
+        x: torch.Tensor x:
+    Returns: torch.Tensor
+    """
+    # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
+    mask = input_ids.ne(padding_idx).int()
+    incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask) + past_key_values_length) * mask
+    return incremental_indices.long() + padding_idx 
