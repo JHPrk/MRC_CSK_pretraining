@@ -15,13 +15,13 @@ class RobertaMuppetTokenizer(RobertaTokenizer):
         unk_token="<unk>",
         pad_token="<pad>",
         mask_token="<mask>",
-        mrc_token="madeupword0000",
-        com_token="madeupword0001",
+        span_token="madeupword0000",
+        mc_token="madeupword0001",
         cls_task_token = "madeupword0002",
         add_prefix_space=False,
         **kwargs):
-        mrc_token = AddedToken(mrc_token, lstrip=False, rstrip=False) if isinstance(mrc_token, str) else mrc_token
-        com_token = AddedToken(com_token, lstrip=False, rstrip=False) if isinstance(com_token, str) else com_token
+        mrc_token = AddedToken(span_token, lstrip=False, rstrip=False) if isinstance(span_token, str) else span_token
+        com_token = AddedToken(mc_token, lstrip=False, rstrip=False) if isinstance(mc_token, str) else mc_token
         cls_task_token = AddedToken(cls_task_token, lstrip=False, rstrip=False) if isinstance(cls_task_token, str) else cls_task_token
         special_tokens_dict  = { "additional_special_tokens" : [mrc_token, com_token, cls_task_token]}
         
