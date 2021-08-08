@@ -1,10 +1,28 @@
 import torch
 import torch.nn as nn
 import transformers
-import nlp
 import logging
 logging.basicConfig(level=logging.INFO)
 
+MODEL_TYPE_DICT={
+        "span": transformers.AutoModelForQuestionAnswering,
+        "cls1": transformers.AutoModelForSequenceClassification,
+        "cls2": transformers.AutoModelForSequenceClassification,
+        "mc": transformers.AutoModelForMultipleChoice,
+    }
+MODEL_NUM_LABEL_DICT={
+        "span": 50800,
+        "cls1": 2,
+        "cls2": 2,
+        "mc": 5,
+    }
+TASK_TYPE_AND_MODEL_TYPE={
+    "TASK1" : "cls1",
+    "TASK2" : "cls2",
+    "TASK3" : "mc",
+    "TASK4" : "mc",
+    "TASK5" : "span"
+}
 class MultitaskModel(transformers.PreTrainedModel):
     def __init__(self, encoder, taskmodels_dict):
         """
@@ -17,7 +35,7 @@ class MultitaskModel(transformers.PreTrainedModel):
         self.taskmodels_dict = nn.ModuleDict(taskmodels_dict)
 
     @classmethod
-    def create(cls, model_name, model_type_dict, model_config_dict):
+    def create(cls, model_name, model_types):
         """
         This creates a MultitaskModel using the model class and config objects
         from single-task models. 
@@ -27,10 +45,10 @@ class MultitaskModel(transformers.PreTrainedModel):
         """
         shared_encoder = None
         taskmodels_dict = {}
-        for task_name, model_type in model_type_dict.items():
-            model = model_type.from_pretrained(
+        for task_name in model_types:
+            model = MODEL_TYPE_DICT[task_name].from_pretrained(
                 model_name, 
-                config=model_config_dict[task_name],
+                config=transformers.AutoConfig.from_pretrained(model_name, num_labels=MODEL_NUM_LABEL_DICT[task_name]),
             )
             if shared_encoder is None:
                 shared_encoder = getattr(model, cls.get_encoder_attr_name(model))
@@ -55,23 +73,20 @@ class MultitaskModel(transformers.PreTrainedModel):
         else:
             raise KeyError(f"Add support for new model {model_class_name}")
 
-    def forward(self, task_name, **kwargs):
-        return self.taskmodels_dict[task_name](**kwargs)
+    def forward(self, **kwargs):
+        results = {}
+        #return 0
+        for key in kwargs:
+            task_model_key = TASK_TYPE_AND_MODEL_TYPE[key]
+            logits = self.taskmodels_dict[task_model_key](**kwargs[key])
+            results[key] = logits
 
-
+        return results
+"""
 model_name = "roberta-base"
 multitask_model = MultitaskModel.create(
     model_name=model_name,
-    model_type_dict={
-        "span": transformers.AutoModelForQuestionAnswering,
-        "cls": transformers.AutoModelForSequenceClassification,
-        "mc": transformers.AutoModelForMultipleChoice,
-    },
-    model_config_dict={
-        "span": transformers.AutoConfig.from_pretrained(model_name, num_labels=2),
-        "cls": transformers.AutoConfig.from_pretrained(model_name, num_labels=2),
-        "mc": transformers.AutoConfig.from_pretrained(model_name, num_labels=2),
-    },
+    model_type_dict=["span", "cls", "mc"]
 )
 
 if model_name.startswith("roberta-"):
@@ -81,3 +96,4 @@ if model_name.startswith("roberta-"):
     print(multitask_model.taskmodels_dict["mc"].roberta.embeddings.word_embeddings.weight.data_ptr())
 else:
     print("Exercise for the reader: add a check for other model architectures =)")
+"""

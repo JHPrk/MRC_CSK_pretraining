@@ -35,6 +35,7 @@ from model.task_utils import (
     ForwardModelsTrain,
     ForwardModelsVal,
 )
+
 from torch.optim.lr_scheduler import (
     LambdaLR,
     ReduceLROnPlateau,
@@ -658,4 +659,4 @@ def evaluate(
 
 if __name__ == "__main__":
 
-    main() 
+    main()

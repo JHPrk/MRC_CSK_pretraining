@@ -15,9 +15,6 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
-from transformers.tokenization_bert import BertTokenizer
-from datasets import DatasetMapTrain, DatasetMapEval
-import pdb
 
 logger = logging.getLogger(__name__)
 

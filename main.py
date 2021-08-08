@@ -13,13 +13,13 @@ from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
-    AutoModelForMaskedLM,
-    AutoTokenizer,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
     set_seed,
+    AdamW,
+    get_scheduler,
+    SchedulerType
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
@@ -29,6 +29,16 @@ import yaml
 from dataset.dataset_loader import MtpDataLoader
 from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 from tqdm.auto import tqdm
+from model.mtl_model import MultitaskModel
+
+from torch.optim.lr_scheduler import (
+    LambdaLR,
+    ReduceLROnPlateau,
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+)
+from accelerate import Accelerator
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.9.0.dev0")
@@ -88,6 +98,18 @@ class ModelArguments:
             "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
             "with private models)."
         },
+    )
+    num_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help":"Number of steps for the warmup in the lr scheduler."
+        }
+    )
+    max_train_steps: int = field(
+        default=None,
+        metadata={
+            "help":"Total number of training steps to perform. If provided, overrides num_train_epochs."
+        }
     )
 
     def __post_init__(self):
@@ -188,6 +210,26 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     """
+    # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
+    accelerator = Accelerator()
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state)
+
+    # Setup logging, we only want one process per machine to log things on the screen.
+    # accelerator.is_local_main_process is only True for one process per machine.
+    logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -278,26 +320,16 @@ def main():
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
-    data_loader = MtpDataLoader(data_args.task_ids, model_args.model_name_or_path, data_args.total_batch_size, tokenizer, dataset_args)
-
+    mt_data_loader = MtpDataLoader(data_args.task_ids, model_args.model_name_or_path, data_args.total_batch_size, tokenizer, dataset_args)
 
     #### 진양씨 모델 붙여넣으세요~~
-    if model_args.model_name_or_path:
-        model = AutoModelForMaskedLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    else:
-        logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
-
-    # jin you need to check if it works?
-    model.resize_token_embeddings(len(tokenizer))
-
+    model_name = "roberta-base"
+    task_types = mt_data_loader.get_task_types()
+    task_types = list(set(task_types))
+    multitask_model = MultitaskModel.create(
+        model_name = model_name,
+        model_types = task_types
+    )
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -318,15 +350,85 @@ def main():
     # data_loader.task_datasets["TASK1"]["train"].select(range(100))
     if training_args.do_train:
         if data_args.max_train_samples is not None:
-            data_loader.select(data_args.max_train_samples)
+            mt_data_loader.select(data_args.max_train_samples)
 
     # Trainer 클래스 선언해서 모델을 돌려야한다.
-    
+    TASK_TYPE_AND_MODEL_TYPE={
+        "TASK1" : "cls",
+        "TASK2" : "cls",
+        "TASK3" : "mc",
+        "TASK4" : "mc"
+    }
+
+    # Optimizer
+    # Split weights in two groups, one with weight decay and the other not.
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in multitask_model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [p for n, p in multitask_model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=training_args.learning_rate)
+
+    multitask_model, optimizer, train_dataloader = accelerator.prepare(
+        multitask_model, optimizer, mt_data_loader
+    )
+
+    # Scheduler and math around the number of training steps.
+    num_update_steps_per_epoch = math.ceil(len(mt_data_loader) / training_args.gradient_accumulation_steps)
+    if model_args.max_train_steps is None:
+        model_args.max_train_steps = training_args.num_train_epochs * num_update_steps_per_epoch
+    else:
+        training_args.num_train_epochs = math.ceil(model_args.max_train_steps / num_update_steps_per_epoch)
+
+    lr_scheduler = get_scheduler(
+        name= training_args.lr_scheduler_type,
+        optimizer=optimizer,
+        num_warmup_steps= model_args.num_warmup_steps,
+        num_training_steps= model_args.max_train_steps,
+    )
+
+    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(mt_data_loader)}")
+    logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
+
+    # Only show the progress bar once on each machine.
+    progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
+    completed_steps = 0
+
+    for epoch in range(training_args.num_train_epochs):
+        multitask_model.train()
+        for step, batch in enumerate(mt_data_loader):
+            outputs = multitask_model(**batch)
+            for key in outputs:
+                loss = outputs[key].loss / training_args.gradient_accumulation_steps
+                loss 
+                accelerator.backward(loss)
+            if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                progress_bar.update(1)
+                completed_steps += 1
+
+            if completed_steps >= model_args.max_train_steps:
+                break
+
     # mtp_loader 데이터 꺼내오기
-    for i, batch in enumerate(data_loader):
-        print("steps : ", i)
-        for task_batch in batch:
-            print(task_batch, " : ", len(batch[task_batch]['labels']))
+    for epoch in range(training_args.num_train_epochs):
+        for i, batch in enumerate(mt_data_loader):
+            print("steps : ", i)
+            multitask_model(**batch)
 
     # Initialize our Trainer
     """
@@ -341,6 +443,7 @@ def main():
 
     # Training
     if training_args.do_train:
+
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint

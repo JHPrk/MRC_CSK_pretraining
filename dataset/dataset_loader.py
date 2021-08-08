@@ -23,8 +23,10 @@ dataset_path = "./"
 
 
 class MtpDataLoader:
-    def __init__(self, task_ids, model_name_or_path, batch_size, task_args, tokenizer, split="trainval"):
-        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(task_ids, tokenizer, task_args)
+    def __init__(self, model_name_or_path, batch_size, tokenizer, 
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, 
+        task_datasets_sampler, task_datasets_loader, task_ids, task_types):
+
         self.task_configs = task_configs
         self.task_datasets = task_datasets
         self.task_datasets_loss = task_datasets_loss
@@ -32,6 +34,7 @@ class MtpDataLoader:
         self.task_datasets_sampler = task_datasets_sampler
         self.task_datasets_loader = task_datasets_loader
         self.task_ids = task_ids
+        self.task_types = task_types
         self.model_name_or_path = model_name_or_path
         self.tokenizer = tokenizer
 
@@ -40,13 +43,17 @@ class MtpDataLoader:
         self.total_steps = int(self.total_datasize / self.batch_size)
         self.cur = 0
         
-
+    @classmethod
+    def create(cls, model_name_or_path, task_ids, batch_size, task_args, tokenizer, split="trainval"):
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids, task_types = cls.LoadDataset(task_ids, tokenizer, task_args)
+        return cls( model_name_or_path, batch_size, tokenizer, task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids, task_types)
     # dataset Load needs
     # task_names
     # cateogries : classification, commonsense, mrc
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
-    def LoadDataset(self, task_ids, task_args, tokenizer, split="trainval"):
+    @classmethod
+    def LoadDataset(cls, task_ids, task_args, tokenizer, split="trainval"):
         ids = task_ids
 
 
@@ -57,12 +64,14 @@ class MtpDataLoader:
         task_datasets_loader = {}
         task_datasets_loss = {}
         task_ids = []
+        task_types = []
 
         for i, task_id in enumerate(ids):
             task = "TASK" + str(task_id)
             task_name = task_args[task]["name"]
             task_ids.append(task)
             task_type = task_args[task]["type"]
+            task_types.append(task_type)
             task_category = task_args[task]["category"]
             task_choices = task_args[task]["choices"]
             dataroot = task_args[task]["dataroot"]
@@ -108,7 +117,8 @@ class MtpDataLoader:
             task_datasets_collator,
             task_datasets_sampler,
             task_datasets_loader,
-            task_ids
+            task_ids,
+            task_types
         )
 
     def _num_each_task_in_batch(self):
@@ -138,9 +148,15 @@ class MtpDataLoader:
             self.cur += 1
             yield batch
 
+    def __len__(self):
+        return self.total_datasize
+
     def select(self, total_num):
         self.total_datasize = total_num
         self.total_steps = int(self.total_datasize / self.batch_size)
+
+    def get_task_types(self):
+        return self.task_types
 
 
 def main(args,task_args):
