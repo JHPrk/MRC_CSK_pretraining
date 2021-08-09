@@ -5,6 +5,7 @@ import json
 from transformers import AutoTokenizer
 import os
 
+
 train_set = "train.csv"
 dev_set = "dev.csv"
 info_file = "info.json"

@@ -4,9 +4,10 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+import torch
 
 import datasets
-from datasets import load_dataset
+from datasets import load_metric
 
 import transformers
 from transformers import (
@@ -38,7 +39,12 @@ from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
 )
 from accelerate import Accelerator
+from evaluation.evaluate_function import TASK_METRICS
 
+import datasets
+from datasets.utils.logging import set_verbosity_error
+set_verbosity_error()
+datasets.logging.set_verbosity(datasets.logging.ERROR)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.9.0.dev0")
@@ -320,11 +326,12 @@ def main():
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
-    mt_data_loader = MtpDataLoader(data_args.task_ids, model_args.model_name_or_path, data_args.total_batch_size, tokenizer, dataset_args)
-
+    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
+    train_dataloader, eval_dataloader = MtpDataLoader.create(model_args.model_name_or_path, data_args.task_ids, total_batch_size, tokenizer, dataset_args)
+    #model_name_or_path, task_ids, batch_size, task_args, tokenizer
     #### 진양씨 모델 붙여넣으세요~~
     model_name = "roberta-base"
-    task_types = mt_data_loader.get_task_types()
+    task_types = train_dataloader.get_task_types()
     task_types = list(set(task_types))
     multitask_model = MultitaskModel.create(
         model_name = model_name,
@@ -350,15 +357,11 @@ def main():
     # data_loader.task_datasets["TASK1"]["train"].select(range(100))
     if training_args.do_train:
         if data_args.max_train_samples is not None:
-            mt_data_loader.select(data_args.max_train_samples)
-
+            train_dataloader.select(data_args.max_train_samples)
+    if training_args.do_eval:
+        if data_args.max_eval_samples is not None:
+            eval_dataloader.select(data_args.max_eval_samples)
     # Trainer 클래스 선언해서 모델을 돌려야한다.
-    TASK_TYPE_AND_MODEL_TYPE={
-        "TASK1" : "cls",
-        "TASK2" : "cls",
-        "TASK3" : "mc",
-        "TASK4" : "mc"
-    }
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -375,12 +378,16 @@ def main():
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=training_args.learning_rate)
 
-    multitask_model, optimizer, train_dataloader = accelerator.prepare(
-        multitask_model, optimizer, mt_data_loader
+    multitask_model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        multitask_model, optimizer, train_dataloader, eval_dataloader
     )
 
+    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
+
     # Scheduler and math around the number of training steps.
-    num_update_steps_per_epoch = math.ceil(len(mt_data_loader) / training_args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / training_args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = int(num_update_steps_per_epoch + 0.5)
+
     if model_args.max_train_steps is None:
         model_args.max_train_steps = training_args.num_train_epochs * num_update_steps_per_epoch
     else:
@@ -393,26 +400,26 @@ def main():
         num_training_steps= model_args.max_train_steps,
     )
 
-    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
-
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(mt_data_loader)}")
+    logger.info(f"  Num examples = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
 
+
+    
+    datasets.logging.set_verbosity(datasets.logging.ERROR)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
 
     for epoch in range(training_args.num_train_epochs):
         multitask_model.train()
-        for step, batch in enumerate(mt_data_loader):
+        for step, batch in enumerate(tqdm(train_dataloader)):
             outputs = multitask_model(**batch)
             for key in outputs:
                 loss = outputs[key].loss / training_args.gradient_accumulation_steps
-                loss 
                 accelerator.backward(loss)
             if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
@@ -423,13 +430,28 @@ def main():
 
             if completed_steps >= model_args.max_train_steps:
                 break
+        multitask_model.eval()
 
-    # mtp_loader 데이터 꺼내오기
-    for epoch in range(training_args.num_train_epochs):
-        for i, batch in enumerate(mt_data_loader):
-            print("steps : ", i)
-            multitask_model(**batch)
+        for key in eval_dataloader.task_datasets_loader:
+            for step, batch in enumerate(tqdm(eval_dataloader.task_datasets_loader[key])):
+                task_batch = {key : batch}
+                with torch.no_grad():
+                    outputs = multitask_model(**task_batch)
+                logits = outputs[key].logits
+                if key != "TASK5":
+                    predictions = logits.argmax(dim=-1)
+                    TASK_METRICS[key].add_batch(
+                        predictions=accelerator.gather(predictions),
+                        references=accelerator.gather(batch["labels"]),
+                    )
 
+            eval_metric = TASK_METRICS[key].compute()
+            logger.info(f"epoch {epoch}, key {key} : {eval_metric}")
+
+    if training_args.output_dir is not None:
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(multitask_model)
+        unwrapped_model.save_pretrained(training_args.output_dir, save_function=accelerator.save)
     # Initialize our Trainer
     """
     trainer = Trainer(

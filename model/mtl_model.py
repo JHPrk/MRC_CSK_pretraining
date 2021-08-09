@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import transformers
 import logging
-logging.basicConfig(level=logging.INFO)
 
 MODEL_TYPE_DICT={
         "span": transformers.AutoModelForQuestionAnswering,
@@ -48,7 +47,7 @@ class MultitaskModel(transformers.PreTrainedModel):
         for task_name in model_types:
             model = MODEL_TYPE_DICT[task_name].from_pretrained(
                 model_name, 
-                config=transformers.AutoConfig.from_pretrained(model_name, num_labels=MODEL_NUM_LABEL_DICT[task_name]),
+                config=transformers.AutoConfig.from_pretrained(model_name, add_pooling_layer=True),
             )
             if shared_encoder is None:
                 shared_encoder = getattr(model, cls.get_encoder_attr_name(model))
