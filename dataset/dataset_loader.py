@@ -167,6 +167,17 @@ class MtpDataLoader:
     def select(self, total_num):
         self.total_datasize = total_num
         self.total_steps = int(self.total_datasize / self.batch_size)
+        if self.split_val == "eval":
+            for task in self.task_datasets : 
+                self.task_datasets[task].select(range(total_num))
+                self.task_datasets_loader[task] = DataLoader(
+                    self.task_datasets[task],
+                    sampler=self.task_datasets_sampler[task],
+                    collate_fn=self.task_datasets_collator[task],
+                    batch_size=self.batch_size,
+                    pin_memory=True,
+                )
+
 
     def get_task_types(self):
         return self.task_types
