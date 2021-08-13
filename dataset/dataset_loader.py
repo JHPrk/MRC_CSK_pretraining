@@ -9,9 +9,12 @@ from random import choices
 from collections import Counter
 
 from dataset.mtl_datasets import DatasetFactory, task_types
-from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 from dataset.mtl_data_collator import CollatorFactory
 from dataset.mtl_sampler import SamplerFactory, compute_sampling_probability
+
+from datasets.utils.logging import set_verbosity_error
+set_verbosity_error()
+datasets.logging.set_verbosity(datasets.logging.ERROR)
 
 categories = ["classification", "commonsense", "mrc"]
 train_set = "train.csv"
@@ -19,12 +22,17 @@ dev_set = "dev.csv"
 test_set = "test.csv"
 info_file = "info.json"
 dataset_path = "./"
+accepted_keys = ["input_ids", "attention_mask", "label"]
 
-
+class StrIgnoreDevice(str):
+    def to(self, device):
+        return self
 
 class MtpDataLoader:
-    def __init__(self, task_ids, model_name_or_path, batch_size, task_args, tokenizer, split="trainval"):
-        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = self.LoadDataset(task_ids, tokenizer, task_args)
+    def __init__(self, model_name_or_path, batch_size, tokenizer, 
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, 
+        task_datasets_sampler, task_datasets_loader, task_ids, task_types, split_val = "train"):
+
         self.task_configs = task_configs
         self.task_datasets = task_datasets
         self.task_datasets_loss = task_datasets_loss
@@ -32,21 +40,29 @@ class MtpDataLoader:
         self.task_datasets_sampler = task_datasets_sampler
         self.task_datasets_loader = task_datasets_loader
         self.task_ids = task_ids
+        self.task_types = task_types
         self.model_name_or_path = model_name_or_path
         self.tokenizer = tokenizer
+        self.split_val = split_val
 
-        self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, "train")
+        self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, split_val)
         self.batch_size = batch_size
         self.total_steps = int(self.total_datasize / self.batch_size)
         self.cur = 0
         
-
+    @classmethod
+    def create(cls, model_name_or_path, task_ids, batch_size, task_args, tokenizer, split="trainval"):
+        task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids, task_types = cls.LoadDataset(task_ids, batch_size, tokenizer, task_args)
+        train_dataset = cls(model_name_or_path, batch_size, tokenizer, task_configs, task_datasets["train"], task_datasets_loss, task_datasets_collator, task_datasets_sampler["train"], task_datasets_loader["train"], task_ids, task_types, "train")
+        eval_dataset = cls(model_name_or_path, batch_size, tokenizer, task_configs, task_datasets["eval"], task_datasets_loss, task_datasets_collator, task_datasets_sampler["eval"], task_datasets_loader["eval"], task_ids, task_types, "eval")
+        return train_dataset, eval_dataset
     # dataset Load needs
     # task_names
     # cateogries : classification, commonsense, mrc
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
-    def LoadDataset(self, task_ids, task_args, tokenizer, split="trainval"):
+    @classmethod
+    def LoadDataset(cls, task_ids, batch_size, task_args, tokenizer, split="trainval"):
         ids = task_ids
 
 
@@ -57,12 +73,24 @@ class MtpDataLoader:
         task_datasets_loader = {}
         task_datasets_loss = {}
         task_ids = []
+        task_types = []
+        cls_id = 1
+        task_datasets["train"] = {}
+        task_datasets["eval"] = {}
+        task_datasets_sampler["eval"] = {}
+        task_datasets_sampler["train"] = {}
+        task_datasets_loader["train"] = {}
+        task_datasets_loader["eval"] = {}
 
         for i, task_id in enumerate(ids):
             task = "TASK" + str(task_id)
             task_name = task_args[task]["name"]
             task_ids.append(task)
             task_type = task_args[task]["type"]
+            if task_type == "cls":
+                task_type += str(cls_id)
+                cls_id += 1
+            task_types.append(task_type)
             task_category = task_args[task]["category"]
             task_choices = task_args[task]["choices"]
             dataroot = task_args[task]["dataroot"]
@@ -73,44 +101,44 @@ class MtpDataLoader:
             task_configs[task] = DatasetFactory[task_name](task_name, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer)
             cur_datasets = task_configs[task]()
 
-            task_datasets[task] = {}
-            task_datasets[task]["train"] = cur_datasets["train"]
-            task_datasets[task]["train"].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
-            task_datasets[task]["eval"] = cur_datasets["eval"]
-            task_datasets[task]["eval"].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+            task_datasets["train"][task] = cur_datasets["train"]
+            task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+            task_datasets["eval"][task] = cur_datasets["eval"]
+            task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
 
             task_datasets_collator[task] = CollatorFactory[task_name](tokenizer)
 
-            task_datasets_sampler[task] = {}
-            task_datasets_sampler[task]["train"] = SamplerFactory[task_name](task_datasets[task]["train"])
-            task_datasets_sampler[task]["eval"] = SamplerFactory[task_name](task_datasets[task]["eval"])
+            task_datasets_sampler["train"][task] = SamplerFactory[task_name](task_datasets["train"][task])
+            task_datasets_sampler["eval"][task] = SamplerFactory[task_name](task_datasets["eval"][task])
 
-            task_datasets_loader[task] = {}
-            """
-            task_datasets_loader[task]["train"] = DataLoader(
-                    task_datasets[task]["train"],
-                    sampler=task_datasets_sampler[task]["train"],
+            task_datasets_loader["train"][task] = DataLoader(
+                    task_datasets["train"][task],
+                    sampler=task_datasets_sampler["train"][task],
                     collate_fn=task_datasets_collator[task],
-                    batch_size=2,
+                    batch_size=batch_size,
                     pin_memory=True,
                 )
-            task_datasets_loader[task]["eval"] = DataLoader(
-                    task_datasets[task]["eval"],
-                    sampler=task_datasets_sampler[task]["eval"],
+            task_datasets_loader["eval"][task] = DataLoader(
+                    task_datasets["eval"][task],
+                    sampler=task_datasets_sampler["eval"][task],
                     collate_fn=task_datasets_collator[task],
-                    batch_size=2,
+                    batch_size=batch_size,
                     pin_memory=True,
                 )
-                """
+                
         return (task_configs, 
             task_datasets,
             task_datasets_loss, 
             task_datasets_collator,
             task_datasets_sampler,
             task_datasets_loader,
-            task_ids
+            task_ids,
+            task_types
         )
 
+    def get_scaling_factor(self, task_name):
+        return self.task_configs[task_name].task_choices
+        
     def _num_each_task_in_batch(self):
         batch_samples = choices(self.task_ids, self.sampling_probability, k=self.batch_size)
         return Counter(batch_samples)
@@ -122,11 +150,12 @@ class MtpDataLoader:
             indices = []
             if task_batch == 0 :
                 continue
-            for i,x in enumerate(self.task_datasets_sampler[task]["train"]) : 
+            for i,x in enumerate(self.task_datasets_sampler[task]) : 
                 indices.append(x)
                 if (i + 1) % task_batch == 0 : 
                     break
-            features= [{k:v for k, v in self.task_datasets[task]["train"][i].items()} for i in indices]
+            #features = self.task_datasets[task][indices]
+            features= [{k:v for k, v in self.task_datasets[task][i].items() if k in accepted_keys} for i in indices]
             batch[task] = self.task_datasets_collator[task](features)
         return batch    
 
@@ -138,13 +167,29 @@ class MtpDataLoader:
             self.cur += 1
             yield batch
 
+    def __len__(self):
+        return self.total_steps
+
     def select(self, total_num):
         self.total_datasize = total_num
         self.total_steps = int(self.total_datasize / self.batch_size)
+        if self.split_val == "eval":
+            for task in self.task_datasets : 
+                self.task_datasets[task].select(range(total_num))
+                self.task_datasets_loader[task] = DataLoader(
+                    self.task_datasets[task],
+                    sampler=self.task_datasets_sampler[task],
+                    collate_fn=self.task_datasets_collator[task],
+                    batch_size=self.batch_size,
+                    pin_memory=True,
+                )
+
+
+    def get_task_types(self):
+        return self.task_types
 
 
 def main(args,task_args):
-    from tqdm.auto import tqdm
     #task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids = LoadDataset(args, task_args, ids)
     #sampling_probability = compute_sampling_probability(task_configs, "train")
     #print(sampling_probability)
@@ -158,12 +203,10 @@ def main(args,task_args):
     # task 3 socialIQA: (bn, 3, 40) output: (bn) 0, 1, 2
     # task 4 CommonsenseQA: (bn, 5, 28) output: (bn) 0, 1, 2, 3, 4
     mtp_loader = MtpDataLoader(args, task_args)
-    progress = tqdm(range(mtp_loader.total_steps))
     for i, batch in enumerate(mtp_loader):
         print("steps : ", i)
         for task_batch in batch:
             print(task_batch, " : ", len(batch[task_batch]['labels']))
-        progress.update(1)
 
 if __name__ == '__main__':
     import yaml

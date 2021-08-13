@@ -4,31 +4,50 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+import torch
+import math
 
 import datasets
-from datasets import load_dataset
+from datasets import load_metric
 
 import transformers
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
-    AutoModelForMaskedLM,
-    AutoTokenizer,
-    DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
     set_seed,
+    AdamW,
+    get_scheduler,
+    SchedulerType
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 from typing import List
 import yaml
-from dataset.dataset_loader import MtpDataLoader
+from dataset.dataset_loader import MtpDataLoader, StrIgnoreDevice
 from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 from tqdm.auto import tqdm
+from model.mtl_model import MultitaskModel
+
+from torch.optim.lr_scheduler import (
+    LambdaLR,
+    ReduceLROnPlateau,
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+)
+from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
+
+from evaluation.evaluate_function import TASK_METRICS
+
+import datasets
+from datasets.utils.logging import set_verbosity_error
+set_verbosity_error()
+datasets.logging.set_verbosity(datasets.logging.ERROR)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.9.0.dev0")
@@ -88,6 +107,18 @@ class ModelArguments:
             "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
             "with private models)."
         },
+    )
+    num_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help":"Number of steps for the warmup in the lr scheduler."
+        }
+    )
+    max_train_steps: int = field(
+        default=None,
+        metadata={
+            "help":"Total number of training steps to perform. If provided, overrides num_train_epochs."
+        }
     )
 
     def __post_init__(self):
@@ -188,6 +219,30 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     """
+    # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
+    ddp_kwargs =  DistributedDataParallelKwargs(find_unused_parameters=training_args.gradient_accumulation_steps > 1)
+    #ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    device = accelerator.device
+
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state)
+
+    # Setup logging, we only want one process per machine to log things on the screen.
+    # accelerator.is_local_main_process is only True for one process per machine.
+    logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -278,26 +333,19 @@ def main():
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
-    data_loader = MtpDataLoader(data_args.task_ids, model_args.model_name_or_path, data_args.total_batch_size, tokenizer, dataset_args)
-
-
+    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
+    train_dataloader, eval_dataloader = MtpDataLoader.create(model_args.model_name_or_path, data_args.task_ids, total_batch_size, tokenizer, dataset_args)
+    #model_name_or_path, task_ids, batch_size, task_args, tokenizer
     #### 진양씨 모델 붙여넣으세요~~
-    if model_args.model_name_or_path:
-        model = AutoModelForMaskedLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
-    else:
-        logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
-
-    # jin you need to check if it works?
-    model.resize_token_embeddings(len(tokenizer))
-
+    model_name = "roberta-base"
+    task_types = train_dataloader.get_task_types()
+    task_types = list(set(task_types))
+    task_types.sort()
+    multitask_model = MultitaskModel.create(
+        model_name = model_name,
+        model_types = task_types
+    )
+    multitask_model.to(device)
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -318,16 +366,125 @@ def main():
     # data_loader.task_datasets["TASK1"]["train"].select(range(100))
     if training_args.do_train:
         if data_args.max_train_samples is not None:
-            data_loader.select(data_args.max_train_samples)
-
+            train_dataloader.select(data_args.max_train_samples)
+    if training_args.do_eval:
+        if data_args.max_eval_samples is not None:
+            eval_dataloader.select(data_args.max_eval_samples)
     # Trainer 클래스 선언해서 모델을 돌려야한다.
-    
-    # mtp_loader 데이터 꺼내오기
-    for i, batch in enumerate(data_loader):
-        print("steps : ", i)
-        for task_batch in batch:
-            print(task_batch, " : ", len(batch[task_batch]['labels']))
 
+    # Optimizer
+    # Split weights in two groups, one with weight decay and the other not.
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in multitask_model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [p for n, p in multitask_model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=training_args.learning_rate)
+
+    multitask_model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        multitask_model, optimizer, train_dataloader, eval_dataloader
+    )
+    #with open(f"params_{accelerator.process_index}.txt", "w") as fo:
+    #    for i, param in enumerate(multitask_model.parameters()):
+    #        fo.write(f"{str(i)}\t{param.size()}\n")
+
+    total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
+
+    # Scheduler and math around the number of training steps.
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / training_args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = int(num_update_steps_per_epoch + 0.5)
+
+    if model_args.max_train_steps is None:
+        model_args.max_train_steps = training_args.num_train_epochs * num_update_steps_per_epoch
+    else:
+        training_args.num_train_epochs = math.ceil(model_args.max_train_steps / num_update_steps_per_epoch)
+
+    lr_scheduler = get_scheduler(
+        name= training_args.lr_scheduler_type,
+        optimizer=optimizer,
+        num_warmup_steps= model_args.num_warmup_steps,
+        num_training_steps= model_args.max_train_steps,
+    )
+
+    logger.info("***** Running training *****")
+    logger.info(f"  Num examples = {len(train_dataloader)}")
+    logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
+
+
+    
+    datasets.logging.set_verbosity(datasets.logging.ERROR)
+    # Only show the progress bar once on each machine.
+    progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
+    completed_steps = 0
+
+    for epoch in range(training_args.num_train_epochs):
+        multitask_model.train()
+        for step, batch in enumerate(tqdm(train_dataloader)):
+            for key in batch:
+                task_batch = batch[key]
+                task_batch["task_name"] = StrIgnoreDevice(key)
+                try : 
+                    task_batch = task_batch.to(device)
+                except:
+                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
+                #task_batch.to(device)
+                outputs = multitask_model(**task_batch)
+                # scaling need
+                scale_factor = train_dataloader.get_scaling_factor(key)
+                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log(scale_factor)
+                accelerator.backward(loss)
+            if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                progress_bar.update(1)
+                completed_steps += 1
+
+            if completed_steps >= model_args.max_train_steps:
+                break
+        multitask_model.eval()
+        eval_metric = {}
+        for key in eval_dataloader.task_datasets_loader:
+            for step, batch in enumerate(tqdm(eval_dataloader.task_datasets_loader[key])):
+                task_batch = batch
+                task_batch["task_name"] = StrIgnoreDevice(key)
+                try : 
+                    task_batch = task_batch.to(device)
+                except:
+                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
+                with torch.no_grad():
+                    outputs = multitask_model(**task_batch)
+                logits = outputs.logits
+                if key != "TASK5":
+                    predictions = logits.argmax(dim=-1)
+                    TASK_METRICS[key].add_batch(
+                        predictions=accelerator.gather(predictions),
+                        references=accelerator.gather(batch["labels"]),
+                    )
+
+            eval_metric[key] = TASK_METRICS[key].compute()
+            logger.info(f"epoch {epoch}, key {key} : {eval_metric[key]}")
+        with open(f"eval_epoch_{str(epoch)}.txt", "w") as fo:
+            for key2 in eval_metric:
+                fo.write(f"epoch {epoch}, key {key2} : {eval_metric[key2]}\n")
+        check_point_dir = training_args.output_dir + "_epoch_" + str(epoch)
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(multitask_model)
+        unwrapped_model.save_pretrained(check_point_dir, save_function=accelerator.save)
+
+    if training_args.output_dir is not None:
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(multitask_model)
+        unwrapped_model.save_pretrained(training_args.output_dir, save_function=accelerator.save)
     # Initialize our Trainer
     """
     trainer = Trainer(
@@ -341,6 +498,7 @@ def main():
 
     # Training
     if training_args.do_train:
+
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
