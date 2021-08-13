@@ -31,5 +31,7 @@ dataset/mrc/multirc/train.jsonl
 dataset/mrc/multirc/val.jsonl
 dataset/mrc/squad1.1/.ipynb_checkpoints
 dataset/mrc/squad1.1/Untitled.ipynb
+dataset/.ipynb_checkpoints
+dataset/Untitled.ipynb
 *.pyc
 *.zip
