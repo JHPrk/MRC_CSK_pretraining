@@ -29,5 +29,7 @@ dataset/classification/CoLA/original/tokenized/out_of_domain_dev.tsv
 dataset/mrc/multirc/test.jsonl
 dataset/mrc/multirc/train.jsonl
 dataset/mrc/multirc/val.jsonl
+dataset/mrc/squad1.1/.ipynb_checkpoints
+dataset/mrc/squad1.1/Untitled.ipynb
 *.pyc
 *.zip
