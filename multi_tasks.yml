@@ -45,7 +45,7 @@ TASK4:
 TASK5:
   name: SQuAD 1.1
   loss: CrossEntropyLoss
-  choices: 1024
+  choices: None
   type: span
   category: mrc
   process: normal

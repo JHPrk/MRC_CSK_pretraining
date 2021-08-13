@@ -21,6 +21,7 @@ SamplerFactory = {
     "MultiRC": RandomSampler,
     "SocialIQA": RandomSampler,
     "CommonsenseQA": RandomSampler,
+    "Squad1.1": RandomSampler
 }
 
 def make_dataset_loader(dataset):

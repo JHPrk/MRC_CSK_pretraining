@@ -1,7 +1,7 @@
 from typing import List, Optional
-from transformers import RobertaTokenizer, AddedToken
+from transformers import RobertaTokenizerFast, AddedToken
 
-class RobertaMuppetTokenizer(RobertaTokenizer):
+class RobertaMuppetTokenizer(RobertaTokenizerFast):
 
     def __init__(
         self,
