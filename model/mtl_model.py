@@ -72,9 +72,11 @@ class MultitaskModel(transformers.PreTrainedModel):
         else:
             raise KeyError(f"Add support for new model {model_class_name}")
 
-    def forward(self, **kwargs):
-        results = {}
+    def forward(self, task_name, **kwargs):
+        #results = {}
         #return 0
+        task_model_key = TASK_TYPE_AND_MODEL_TYPE[task_name]
+        return self.taskmodels_dict[task_model_key](**kwargs)
         for key in kwargs:
             task_model_key = TASK_TYPE_AND_MODEL_TYPE[key]
             logits = self.taskmodels_dict[task_model_key](**kwargs[key])

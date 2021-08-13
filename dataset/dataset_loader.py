@@ -24,6 +24,9 @@ info_file = "info.json"
 dataset_path = "./"
 accepted_keys = ["input_ids", "attention_mask", "label"]
 
+class StrIgnoreDevice(str):
+    def to(self, device):
+        return self
 
 class MtpDataLoader:
     def __init__(self, model_name_or_path, batch_size, tokenizer, 
@@ -133,6 +136,9 @@ class MtpDataLoader:
             task_types
         )
 
+    def get_scaling_factor(self, task_name):
+        return self.task_configs[task_name].task_choices
+        
     def _num_each_task_in_batch(self):
         batch_samples = choices(self.task_ids, self.sampling_probability, k=self.batch_size)
         return Counter(batch_samples)

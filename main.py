@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 import torch
+import math
 
 import datasets
 from datasets import load_metric
@@ -27,7 +28,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 from typing import List
 import yaml
-from dataset.dataset_loader import MtpDataLoader
+from dataset.dataset_loader import MtpDataLoader, StrIgnoreDevice
 from custom_tokenizers.muppet_tokenizer import RobertaMuppetTokenizer
 from tqdm.auto import tqdm
 from model.mtl_model import MultitaskModel
@@ -39,6 +40,8 @@ from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
 )
 from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
+
 from evaluation.evaluate_function import TASK_METRICS
 
 import datasets
@@ -217,7 +220,11 @@ def main():
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     """
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
-    accelerator = Accelerator()
+    ddp_kwargs =  DistributedDataParallelKwargs(find_unused_parameters=training_args.gradient_accumulation_steps > 1)
+    #ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    device = accelerator.device
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -333,10 +340,12 @@ def main():
     model_name = "roberta-base"
     task_types = train_dataloader.get_task_types()
     task_types = list(set(task_types))
+    task_types.sort()
     multitask_model = MultitaskModel.create(
         model_name = model_name,
         model_types = task_types
     )
+    multitask_model.to(device)
 
     if data_args.max_seq_length is None:
         max_seq_length = tokenizer.model_max_length
@@ -381,6 +390,9 @@ def main():
     multitask_model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
         multitask_model, optimizer, train_dataloader, eval_dataloader
     )
+    #with open(f"params_{accelerator.process_index}.txt", "w") as fo:
+    #    for i, param in enumerate(multitask_model.parameters()):
+    #        fo.write(f"{str(i)}\t{param.size()}\n")
 
     total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
 
@@ -417,9 +429,18 @@ def main():
     for epoch in range(training_args.num_train_epochs):
         multitask_model.train()
         for step, batch in enumerate(tqdm(train_dataloader)):
-            outputs = multitask_model(**batch)
-            for key in outputs:
-                loss = outputs[key].loss / training_args.gradient_accumulation_steps
+            for key in batch:
+                task_batch = batch[key]
+                task_batch["task_name"] = StrIgnoreDevice(key)
+                try : 
+                    task_batch = task_batch.to(device)
+                except:
+                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
+                #task_batch.to(device)
+                outputs = multitask_model(**task_batch)
+                # scaling need
+                scale_factor = train_dataloader.get_scaling_factor(key)
+                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log(scale_factor)
                 accelerator.backward(loss)
             if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 optimizer.step()
@@ -431,13 +452,18 @@ def main():
             if completed_steps >= model_args.max_train_steps:
                 break
         multitask_model.eval()
-
+        eval_metric = {}
         for key in eval_dataloader.task_datasets_loader:
             for step, batch in enumerate(tqdm(eval_dataloader.task_datasets_loader[key])):
-                task_batch = {key : batch}
+                task_batch = batch
+                task_batch["task_name"] = StrIgnoreDevice(key)
+                try : 
+                    task_batch = task_batch.to(device)
+                except:
+                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
                 with torch.no_grad():
                     outputs = multitask_model(**task_batch)
-                logits = outputs[key].logits
+                logits = outputs.logits
                 if key != "TASK5":
                     predictions = logits.argmax(dim=-1)
                     TASK_METRICS[key].add_batch(
@@ -445,8 +471,15 @@ def main():
                         references=accelerator.gather(batch["labels"]),
                     )
 
-            eval_metric = TASK_METRICS[key].compute()
-            logger.info(f"epoch {epoch}, key {key} : {eval_metric}")
+            eval_metric[key] = TASK_METRICS[key].compute()
+            logger.info(f"epoch {epoch}, key {key} : {eval_metric[key]}")
+        with open(f"eval_epoch_{str(epoch)}.txt", "w") as fo:
+            for key2 in eval_metric:
+                fo.write(f"epoch {epoch}, key {key2} : {eval_metric[key2]}\n")
+        check_point_dir = training_args.output_dir + "_epoch_" + str(epoch)
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(multitask_model)
+        unwrapped_model.save_pretrained(check_point_dir, save_function=accelerator.save)
 
     if training_args.output_dir is not None:
         accelerator.wait_for_everyone()
