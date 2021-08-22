@@ -43,7 +43,7 @@ TASK4:
   max_seq_length: 1024
   train_split: train
 TASK5:
-  name: SQuAD 1.1
+  name: SQuAD1.1
   loss: CrossEntropyLoss
   choices: None
   type: span

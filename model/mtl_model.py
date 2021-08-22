@@ -8,6 +8,7 @@ MODEL_TYPE_DICT={
         "cls1": transformers.AutoModelForSequenceClassification,
         "cls2": transformers.AutoModelForSequenceClassification,
         "mc": transformers.AutoModelForMultipleChoice,
+        "span": transformers.AutoModelForQuestionAnswering
     }
 MODEL_NUM_LABEL_DICT={
         "span": 50800,

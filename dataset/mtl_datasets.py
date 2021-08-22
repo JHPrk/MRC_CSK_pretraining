@@ -105,7 +105,7 @@ class MultiRCDataset(Dataset) :
         tokenized_examples = self.tokenizer(passage_question, second_answer, truncation=True)
         return {k : v for k, v in tokenized_examples.items()}
 
-class SQuadDataset(Dataset) :
+class SquadDataset(Dataset) :
     def __init__(self, task, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer) :
         super().__init__(task, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer) 
     
@@ -115,7 +115,7 @@ class SQuadDataset(Dataset) :
             span_token_question,
             examples['context'],
             truncation=True,
-            max_length=max_seq_length,
+            max_length=self.max_seq_length,
             return_overflowing_tokens=True, 
             return_offsets_mapping=True, 
         )
@@ -166,7 +166,7 @@ DatasetFactory = {
     "MultiRC": MultiRCDataset,
     "SocialIQA": SocialIQADataset,
     "CommonsenseQA": CommonsenseQADataset,
-    "Squad1.1": SQuadDataset
+    "SQuAD1.1": SquadDataset
 }
 
 if __name__ == "__main__":

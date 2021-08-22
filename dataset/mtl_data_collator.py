@@ -49,7 +49,7 @@ CollatorFactory = {
     "MultiRC": DataCollatorWithPadding,
     "SocialIQA": DataCollatorForMultipleChoice,
     "CommonsenseQA": DataCollatorForMultipleChoice,
-    "Squad1.1": DataCollatorWithPadding,
+    "SQuAD1.1": DataCollatorWithPadding,
 }
 
 def main():

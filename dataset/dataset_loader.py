@@ -23,6 +23,7 @@ test_set = "test.csv"
 info_file = "info.json"
 dataset_path = "./"
 accepted_keys = ["input_ids", "attention_mask", "label"]
+task_5_keys = ["input_ids", "attention_mask", "start_positions", "end_positions"]
 
 class StrIgnoreDevice(str):
     def to(self, device):
@@ -51,7 +52,7 @@ class MtpDataLoader:
         self.cur = 0
         
     @classmethod
-    def create(cls, model_name_or_path, task_ids, batch_size, task_args, tokenizer, split="trainval"):
+    def create(cls, model_name_or_path, task_ids, batch_size, tokenizer, task_args,split="trainval"):
         task_configs, task_datasets, task_datasets_loss, task_datasets_collator, task_datasets_sampler, task_datasets_loader, task_ids, task_types = cls.LoadDataset(task_ids, batch_size, tokenizer, task_args)
         train_dataset = cls(model_name_or_path, batch_size, tokenizer, task_configs, task_datasets["train"], task_datasets_loss, task_datasets_collator, task_datasets_sampler["train"], task_datasets_loader["train"], task_ids, task_types, "train")
         eval_dataset = cls(model_name_or_path, batch_size, tokenizer, task_configs, task_datasets["eval"], task_datasets_loss, task_datasets_collator, task_datasets_sampler["eval"], task_datasets_loader["eval"], task_ids, task_types, "eval")
@@ -62,7 +63,7 @@ class MtpDataLoader:
     # files structure : train.csv, dev.csv, test.csv with info.json
     # json file has ... choices, type, columns
     @classmethod
-    def LoadDataset(cls, task_ids, batch_size, task_args, tokenizer, split="trainval"):
+    def LoadDataset(cls, task_ids, batch_size, tokenizer, task_args, split="trainval"):
         ids = task_ids
 
 
@@ -102,9 +103,15 @@ class MtpDataLoader:
             cur_datasets = task_configs[task]()
 
             task_datasets["train"][task] = cur_datasets["train"]
-            task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+            if task == "TASK5":
+                task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
+            else:
+                task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
             task_datasets["eval"][task] = cur_datasets["eval"]
-            task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+            if task == "TASK5":
+                task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
+            else:
+                task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
 
             task_datasets_collator[task] = CollatorFactory[task_name](tokenizer)
 
@@ -137,7 +144,7 @@ class MtpDataLoader:
         )
 
     def get_scaling_factor(self, task_name):
-        return self.task_configs[task_name].task_choices
+        return self.task_configs[task_name].task_choices if isinstance(self.task_configs[task_name].task_choices,int) else self.tokenizer.vocab_size
         
     def _num_each_task_in_batch(self):
         batch_samples = choices(self.task_ids, self.sampling_probability, k=self.batch_size)
@@ -155,7 +162,11 @@ class MtpDataLoader:
                 if (i + 1) % task_batch == 0 : 
                     break
             #features = self.task_datasets[task][indices]
-            features= [{k:v for k, v in self.task_datasets[task][i].items() if k in accepted_keys} for i in indices]
+            if task == "TASK5" : 
+                batch_keys = task_5_keys
+            else:
+                batch_keys = accepted_keys
+            features= [{k:v for k, v in self.task_datasets[task][i].items() if k in batch_keys} for i in indices]
             batch[task] = self.task_datasets_collator[task](features)
         return batch    
 

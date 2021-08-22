@@ -42,7 +42,7 @@ from torch.optim.lr_scheduler import (
 from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 
-from evaluation.evaluate_function import TASK_METRICS
+from evaluation.evaluate_function import TASK_METRICS, postprocess_qa_predictions
 
 import datasets
 from datasets.utils.logging import set_verbosity_error
@@ -198,7 +198,7 @@ class DataTrainingArguments:
     )
     tasks: List[str] = field(default_factory=list,
         metadata={
-            "help": "multi-tasking learning dataset names ([\"multiRC\", \"CoLA\", \"SocialIQA\"])"
+            "help": "multi-tasking learning dataset names ([\"multiRC\", \"CoLA\", \"SocialIQA\", \"SQUAD\"])"
         },
     )
 
@@ -420,7 +420,7 @@ def main():
     logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
 
 
-    
+    devices = {"TASK1" : "cuda:1", "TASK2" : "cuda:2", "TASK3" : "cuda:4", "TASK4" : "cuda:5", "TASK5" : "cuda:6"}
     datasets.logging.set_verbosity(datasets.logging.ERROR)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -432,10 +432,11 @@ def main():
             for key in batch:
                 task_batch = batch[key]
                 task_batch["task_name"] = StrIgnoreDevice(key)
+                multitask_model.to(devices[key])
                 try : 
-                    task_batch = task_batch.to(device)
+                    task_batch = task_batch.to(devices[key]) # device
                 except:
-                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
+                    task_batch = {k : v.to(devices[key]) for k, v in task_batch.items() }
                 #task_batch.to(device)
                 outputs = multitask_model(**task_batch)
                 # scaling need
@@ -443,6 +444,7 @@ def main():
                 loss = outputs.loss / training_args.gradient_accumulation_steps / math.log(scale_factor)
                 accelerator.backward(loss)
             if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                multitask_model.to(device)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -457,25 +459,34 @@ def main():
             for step, batch in enumerate(tqdm(eval_dataloader.task_datasets_loader[key])):
                 task_batch = batch
                 task_batch["task_name"] = StrIgnoreDevice(key)
+                multitask_model.to(devices[key])
                 try : 
-                    task_batch = task_batch.to(device)
+                    task_batch = task_batch.to(devices[key]) # device
                 except:
-                    task_batch = {k : v.to(device) for k, v in task_batch.items() }
+                    task_batch = {k : v.to(devices[key]) for k, v in task_batch.items() } #device
                 with torch.no_grad():
                     outputs = multitask_model(**task_batch)
-                logits = outputs.logits
+                
                 if key != "TASK5":
+                    logits = outputs.logits
                     predictions = logits.argmax(dim=-1)
                     TASK_METRICS[key].add_batch(
                         predictions=accelerator.gather(predictions),
                         references=accelerator.gather(batch["labels"]),
                     )
+                else :
+                    preds, label = postprocess_qa_predictions(task_batch, outputs)
+                    TASK_METRICS[key].add_batch(
+                        predictions=accelerator.gather(preds),
+                        references=accelerator.gather(label),
+                    )
 
             eval_metric[key] = TASK_METRICS[key].compute()
-            logger.info(f"epoch {epoch}, key {key} : {eval_metric[key]}")
-        with open(f"eval_epoch_{str(epoch)}.txt", "w") as fo:
+            task_name = dataset_args[key]["name"]
+            logger.info(f"epoch {epoch}, key {task_name} : {eval_metric[key]}")
+        with open(training_args.output_dir + f"eval_epoch_{str(epoch)}.txt", "w") as fo:
             for key2 in eval_metric:
-                fo.write(f"epoch {epoch}, key {key2} : {eval_metric[key2]}\n")
+                fo.write(f"epoch {epoch}, key {task_name} : {eval_metric[key2]}\n")
         check_point_dir = training_args.output_dir + "_epoch_" + str(epoch)
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(multitask_model)
