@@ -8,7 +8,7 @@ TASK1:
   task_id: 1
   dataroot: mrc/multirc
   max_seq_length: 1024
-  train_split: train
+  train_split: train_eval
 TASK2:
   name: CoLA
   loss: CrossEntropyLoss
@@ -19,7 +19,7 @@ TASK2:
   task_id: 2
   dataroot: classification/CoLA
   max_seq_length: 1024
-  train_split: train
+  train_split: train_eval
 TASK3:
   name: SocialIQA
   loss: CrossEntropyLoss
@@ -30,7 +30,7 @@ TASK3:
   task_id: 3
   dataroot: commonsense/socialIQA
   max_seq_length: 1024
-  train_split: train
+  train_split: train_eval
 TASK4:
   name: CommonsenseQA
   loss: CrossEntropyLoss
@@ -41,7 +41,7 @@ TASK4:
   task_id: 4
   dataroot: commonsense/commonsenseQA
   max_seq_length: 1024
-  train_split: train
+  train_split: train_eval
 TASK5:
   name: SQuAD1.1
   loss: CrossEntropyLoss
@@ -52,4 +52,15 @@ TASK5:
   task_id: 5
   dataroot: mrc/squad1.1
   max_seq_length: 1024
-  train_split: train
+  train_split: train_eval
+TASK6:
+  name: CosmosQA
+  loss: CrossEntropyLoss
+  choices: 4
+  type: mc
+  category: commonsense
+  process: normal
+  task_id: 6
+  dataroot: commonsense/cosmosQA
+  max_seq_length: 1024
+  train_split: eval

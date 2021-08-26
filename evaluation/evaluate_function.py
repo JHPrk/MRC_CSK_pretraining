@@ -6,11 +6,12 @@ import torch
 
 TASK_METRICS = {
     "TASK1" : load_metric("accuracy"),
-    "TASK2" : load_metric("glue", "cola"),
+    "TASK2" : load_metric("accuracy"), #load_metric("glue", "cola"),
     "TASK3" : load_metric("accuracy"),
     "TASK4" : load_metric("accuracy"),
     "TASK4" : load_metric("accuracy"),
-    "TASK5" : load_metric("accuracy") #load_metric("squad")
+    "TASK5" : load_metric("accuracy"), #load_metric("squad")
+    "TASK6" : load_metric("accuracy")
 }
 
 
@@ -34,6 +35,6 @@ def postprocess_qa_predictions(features, raw_predictions):
     start_preds = start_indexes == features["start_positions"]
     end_preds = end_indexes == features["end_positions"]
 
-    fin_preds = (start_preds == end_preds).to(torch.long)
+    fin_preds = (start_preds & end_preds).to(torch.long)
     label = (start_preds == start_preds).to(torch.long)
     return fin_preds, label

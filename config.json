@@ -1,30 +1,31 @@
 {
-    "model_name_or_path" : "roberta-large",
+    "model_name_or_path" : "roberta-base",
     "use_fast_tokenizer" : true,
     "config_name" : null,
     "tokenizer_name" : null,
 
     "dataset_config_name" : "multi_tasks.yml",
     "multitask_learning" : true,
-    "tasks" : ["multiRC", "CoLA", "SocialIQA",  "CommonsenseQA", "SQuAD 1.1"],
-    "task_ids" : [3,4,1,2,5],
+    "tasks" : ["multiRC", "CoLA", "SocialIQA",  "CommonsenseQA", "SQuAD 1.1", "CosmosQA"],
+    "task_ids" : [1,2,3,4,5,6],
     "validation_split_percentage" : 5,
     "max_seq_length" : null,
     "line_by_line" : false,
     "pad_to_max_length" : true,
-    "max_train_samples" : null,
+    "max_train_samples" : 20000,
     "max_eval_samples" : null,
     
     "do_train" : true,
     "do_eval" : true,
-    "output_dir" : "/home/aimaster/lab_storage/models/test/mtl_test",
+    "output_dir" : "/home/aimaster/lab_storage/models/test/mtl_limited_train2",
     "evaluation_strategy" : "epoch",
-    "per_device_train_batch_size" : 32,
-    "per_device_eval_batch_size" : 16,
+    "per_device_train_batch_size" : 10,
+    "per_device_eval_batch_size" : 10,
     "do_predict" : false,
     "adafactor" : false,
-    "num_train_epochs" : 4,
+    "num_train_epochs" : 20,
     "lr_scheduler_type" : "linear",
-    "seed" : 42
+    "seed" : 32,
+    "overwrite_output" : true
 }
 

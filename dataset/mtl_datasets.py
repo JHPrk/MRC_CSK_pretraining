@@ -92,6 +92,28 @@ class SocialIQADataset(Dataset) :
         mapped_result = {k: [v[i:i+3] for i in range(0, len(v), 3)] for k, v in tokenized_examples.items()}
         return mapped_result
 
+
+class CosmosQADataset(Dataset) :
+    def __init__(self, task, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer):
+        super().__init__(task, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer)
+        self.choice_names = ["answer0", "answer1", "answer2", "answer3"]
+        
+    def preprocess_function(self, examples):
+        first_sentences = [[mc_token + question + "\n" + examples['context'][i]] * 4 for i, question in enumerate(examples["question"])]
+        question_headers = examples["context"]
+        second_sentences = [[f"{examples[choice][i]}" for choice in self.choice_names] for i, header in enumerate(question_headers)]
+        examples['class'] = [self.task] * len(examples["context"])
+
+        # Flatten
+        first_sentences = sum(first_sentences, [])
+        second_sentences = sum(second_sentences, [])
+        
+        tokenized_examples = self.tokenizer(first_sentences, second_sentences, truncation=True)
+
+        # Un-flatten
+        mapped_result = {k: [v[i:i+4] for i in range(0, len(v), 4)] for k, v in tokenized_examples.items()}
+        return mapped_result
+
 class MultiRCDataset(Dataset) :
     #passage,question,answer,label
     def __init__(self, task, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer):
@@ -166,7 +188,8 @@ DatasetFactory = {
     "MultiRC": MultiRCDataset,
     "SocialIQA": SocialIQADataset,
     "CommonsenseQA": CommonsenseQADataset,
-    "SQuAD1.1": SquadDataset
+    "SQuAD1.1": SquadDataset,
+    "CosmosQA": CosmosQADataset
 }
 
 if __name__ == "__main__":

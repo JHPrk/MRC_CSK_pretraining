@@ -8,7 +8,6 @@ MODEL_TYPE_DICT={
         "cls1": transformers.AutoModelForSequenceClassification,
         "cls2": transformers.AutoModelForSequenceClassification,
         "mc": transformers.AutoModelForMultipleChoice,
-        "span": transformers.AutoModelForQuestionAnswering
     }
 MODEL_NUM_LABEL_DICT={
         "span": 50800,
@@ -21,7 +20,8 @@ TASK_TYPE_AND_MODEL_TYPE={
     "TASK2" : "cls2",
     "TASK3" : "mc",
     "TASK4" : "mc",
-    "TASK5" : "span"
+    "TASK5" : "span",
+    "TASK6" : "mc",
 }
 class MultitaskModel(transformers.PreTrainedModel):
     def __init__(self, encoder, taskmodels_dict):

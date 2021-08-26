@@ -6,11 +6,11 @@ from dataset.mtl_data_collator import CollatorFactory
 from torch.utils.data import DataLoader, RandomSampler
 
 # datasampler (Distributed 이용 필요) or parallel
-def compute_sampling_probability(task_configs, data_type):
+def compute_sampling_probability(task_configs, data_type, task_ids):
     probability = []
     total_size = 0
-    for value in task_configs.values():
-        dataset_size = value.datasets[data_type].num_rows
+    for task_id in task_ids:
+        dataset_size = task_configs[task_id].datasets[data_type].num_rows
         probability.append(dataset_size)
         total_size += dataset_size
     probability[:] = [ x / total_size for x in probability]
@@ -21,7 +21,8 @@ SamplerFactory = {
     "MultiRC": RandomSampler,
     "SocialIQA": RandomSampler,
     "CommonsenseQA": RandomSampler,
-    "SQuAD1.1": RandomSampler
+    "SQuAD1.1": RandomSampler,
+    "CosmosQA": RandomSampler
 }
 
 def make_dataset_loader(dataset):

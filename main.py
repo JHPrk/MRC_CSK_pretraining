@@ -202,6 +202,14 @@ class DataTrainingArguments:
         },
     )
 
+def mkdir_p(path):
+    """ Creates a path recursively without throwing an error if it already exists
+    :param path: path to create
+    :return: None
+    """
+    if not os.path.exists(path):
+        os.makedirs(path)
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -337,7 +345,7 @@ def main():
     train_dataloader, eval_dataloader = MtpDataLoader.create(model_args.model_name_or_path, data_args.task_ids, total_batch_size, tokenizer, dataset_args)
     #model_name_or_path, task_ids, batch_size, task_args, tokenizer
     #### 진양씨 모델 붙여넣으세요~~
-    model_name = "roberta-base"
+    model_name = model_args.model_name_or_path
     task_types = train_dataloader.get_task_types()
     task_types = list(set(task_types))
     task_types.sort()
@@ -420,15 +428,55 @@ def main():
     logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
 
 
-    devices = {"TASK1" : "cuda:1", "TASK2" : "cuda:2", "TASK3" : "cuda:4", "TASK4" : "cuda:5", "TASK5" : "cuda:6"}
+    devices = {"TASK1" : "cuda:1", "TASK2" : "cuda:2", "TASK3" : "cuda:4", "TASK4" : "cuda:4", "TASK5" : "cuda:6", "TASK6" : "cuda:7"}
     datasets.logging.set_verbosity(datasets.logging.ERROR)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
 
+    mkdir_p(training_args.output_dir)
+    """multitask_model.eval()
+    eval_metric = {}
+    for key in eval_dataloader.task_datasets_loader:
+        for step, batch in enumerate(tqdm(eval_dataloader.task_datasets_loader[key])):
+            task_batch = batch
+            task_batch["task_name"] = StrIgnoreDevice(key)
+            multitask_model.to(devices[key])
+            try : 
+                task_batch = task_batch.to(devices[key]) # device
+            except:
+                task_batch = {k : v.to(devices[key]) for k, v in task_batch.items() } #device
+            with torch.no_grad():
+                outputs = multitask_model(**task_batch)
+            
+            if key != "TASK5":
+                logits = outputs.logits
+                predictions = logits.argmax(dim=-1)
+                TASK_METRICS[key].add_batch(
+                    predictions=accelerator.gather(predictions),
+                    references=accelerator.gather(batch["labels"]),
+                )
+            else :
+                preds, label = postprocess_qa_predictions(task_batch, outputs)
+                TASK_METRICS[key].add_batch(
+                    predictions=accelerator.gather(preds),
+                    references=accelerator.gather(label),
+                )
+
+        eval_metric[key] = TASK_METRICS[key].compute()
+        task_name = dataset_args[key]["name"]
+        logger.info(f"epoch init, key {task_name} : {eval_metric[key]}")
+    with open(training_args.output_dir + f"/eval_epoch_init.txt", "w") as fo:
+        for key2 in eval_metric:
+            task_name = dataset_args[key2]["name"]
+            fo.write(f"epoch init, key {task_name} : {eval_metric[key2]}\n")"""
     for epoch in range(training_args.num_train_epochs):
+        acc_loss = {}
+        for task_id in train_dataloader.task_ids:
+            acc_loss[task_id] = []
         multitask_model.train()
         for step, batch in enumerate(tqdm(train_dataloader)):
+            cur_loss = {}
             for key in batch:
                 task_batch = batch[key]
                 task_batch["task_name"] = StrIgnoreDevice(key)
@@ -441,14 +489,26 @@ def main():
                 outputs = multitask_model(**task_batch)
                 # scaling need
                 scale_factor = train_dataloader.get_scaling_factor(key)
-                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log(scale_factor)
+                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log10(scale_factor)
+                cur_loss[key] = outputs.loss.item()
                 accelerator.backward(loss)
+            if (completed_steps) % 50 == 0 :
+                with open(training_args.output_dir + f"/epoch_{str(epoch)}_step_{str(step)}.txt", "w") as fo:
+                    for key2 in cur_loss:
+                        task_name = dataset_args[key2]["name"]
+                        fo.write(f"key {task_name} loss : {cur_loss[key2]}\n")
+                for task_id in train_dataloader.task_ids:
+                    if task_id in cur_loss.keys():
+                        acc_loss[task_id].append(cur_loss[task_id])
+                    else:
+                        acc_loss[task_id].append(" ")
             if step % training_args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                 multitask_model.to(device)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 progress_bar.update(1)
+                progress_bar.set_postfix(cur_loss)
                 completed_steps += 1
 
             if completed_steps >= model_args.max_train_steps:
@@ -484,10 +544,16 @@ def main():
             eval_metric[key] = TASK_METRICS[key].compute()
             task_name = dataset_args[key]["name"]
             logger.info(f"epoch {epoch}, key {task_name} : {eval_metric[key]}")
-        with open(training_args.output_dir + f"eval_epoch_{str(epoch)}.txt", "w") as fo:
+        with open(training_args.output_dir + f"/eval_epoch_{str(epoch)}.txt", "w") as fo:
             for key2 in eval_metric:
+                task_name = dataset_args[key2]["name"]
                 fo.write(f"epoch {epoch}, key {task_name} : {eval_metric[key2]}\n")
-        check_point_dir = training_args.output_dir + "_epoch_" + str(epoch)
+        with open(training_args.output_dir + f"/epoch_{str(epoch)}_loss.txt", "w") as fo:
+            for key2 in acc_loss:
+                task_name = dataset_args[key2]["name"]
+                fo.write(f"key {task_name} loss : {acc_loss[key2]}\n")
+        check_point_dir = training_args.output_dir + "/epoch_" + str(epoch)
+        mkdir_p(check_point_dir)
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(multitask_model)
         unwrapped_model.save_pretrained(check_point_dir, save_function=accelerator.save)

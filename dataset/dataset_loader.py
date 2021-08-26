@@ -13,6 +13,7 @@ from dataset.mtl_data_collator import CollatorFactory
 from dataset.mtl_sampler import SamplerFactory, compute_sampling_probability
 
 from datasets.utils.logging import set_verbosity_error
+import torch
 set_verbosity_error()
 datasets.logging.set_verbosity(datasets.logging.ERROR)
 
@@ -46,7 +47,7 @@ class MtpDataLoader:
         self.tokenizer = tokenizer
         self.split_val = split_val
 
-        self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, split_val)
+        self.sampling_probability, self.total_datasize = compute_sampling_probability(task_configs, split_val, task_ids)
         self.batch_size = batch_size
         self.total_steps = int(self.total_datasize / self.batch_size)
         self.cur = 0
@@ -86,53 +87,53 @@ class MtpDataLoader:
         for i, task_id in enumerate(ids):
             task = "TASK" + str(task_id)
             task_name = task_args[task]["name"]
-            task_ids.append(task)
+            split = task_args[task]['train_split']
+            if "train" in split :
+                task_ids.append(task)
             task_type = task_args[task]["type"]
             if task_type == "cls":
-                task_type += str(cls_id)
+                task_type += str(task_id)
                 cls_id += 1
             task_types.append(task_type)
             task_category = task_args[task]["category"]
             task_choices = task_args[task]["choices"]
             dataroot = task_args[task]["dataroot"]
             max_seq_length = task_args[task]['max_seq_length']
-            split = task_args[task]['train_split']
             loss = task_args[task]['loss']
             task_datasets_loss[task] = loss
             task_configs[task] = DatasetFactory[task_name](task_name, dataroot, split, task_type, task_category, task_choices, max_seq_length, tokenizer)
             cur_datasets = task_configs[task]()
-
-            task_datasets["train"][task] = cur_datasets["train"]
-            if task == "TASK5":
-                task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
-            else:
-                task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
-            task_datasets["eval"][task] = cur_datasets["eval"]
-            if task == "TASK5":
-                task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
-            else:
-                task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
-
             task_datasets_collator[task] = CollatorFactory[task_name](tokenizer)
 
-            task_datasets_sampler["train"][task] = SamplerFactory[task_name](task_datasets["train"][task])
-            task_datasets_sampler["eval"][task] = SamplerFactory[task_name](task_datasets["eval"][task])
-
-            task_datasets_loader["train"][task] = DataLoader(
+            if "train" in split :
+                task_datasets["train"][task] = cur_datasets["train"]
+                if task == "TASK5":
+                    task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
+                else:
+                    task_datasets["train"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+                task_datasets_sampler["train"][task] = SamplerFactory[task_name](task_datasets["train"][task])
+                task_datasets_loader["train"][task] = DataLoader(
                     task_datasets["train"][task],
                     sampler=task_datasets_sampler["train"][task],
                     collate_fn=task_datasets_collator[task],
                     batch_size=batch_size,
                     pin_memory=True,
                 )
-            task_datasets_loader["eval"][task] = DataLoader(
+            if "eval" in split:
+                task_datasets["eval"][task] = cur_datasets["eval"]
+                if task == "TASK5":
+                    task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'start_positions', 'end_positions'])
+                else:
+                    task_datasets["eval"][task].set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+                task_datasets_sampler["eval"][task] = SamplerFactory[task_name](task_datasets["eval"][task])
+                task_datasets_loader["eval"][task] = DataLoader(
                     task_datasets["eval"][task],
                     sampler=task_datasets_sampler["eval"][task],
                     collate_fn=task_datasets_collator[task],
                     batch_size=batch_size,
                     pin_memory=True,
                 )
-                
+
         return (task_configs, 
             task_datasets,
             task_datasets_loss, 
@@ -144,7 +145,7 @@ class MtpDataLoader:
         )
 
     def get_scaling_factor(self, task_name):
-        return self.task_configs[task_name].task_choices if isinstance(self.task_configs[task_name].task_choices,int) else self.tokenizer.vocab_size
+        return self.task_configs[task_name].task_choices if isinstance(self.task_configs[task_name].task_choices,int) else 512
         
     def _num_each_task_in_batch(self):
         batch_samples = choices(self.task_ids, self.sampling_probability, k=self.batch_size)
@@ -168,6 +169,11 @@ class MtpDataLoader:
                 batch_keys = accepted_keys
             features= [{k:v for k, v in self.task_datasets[task][i].items() if k in batch_keys} for i in indices]
             batch[task] = self.task_datasets_collator[task](features)
+            """if batch[task]['input_ids'].shape[1] > 514 :
+                for input_ids in batch[task]['input_ids']:
+                    if input_ids[-1] != 1:
+                        print(self.tokenizer.decode(input_ids))
+                assert batch[task]['input_ids'].shape[1] > 514"""
         return batch    
 
     def __iter__(self) :
