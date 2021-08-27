@@ -8,7 +8,8 @@ pip install git+https://github.com/huggingface/transformers.git
 
 1. MRC : MultiRC(SuperGLUE), Squad1.1
 2. Classification : CoLA(GLUE)
-3. Commonsense : SocialIQA, CommonsenseQA
+3. Commonsense : SocialIQA, CommonsenseQA, CosmosQA(eval)
+
 
 # Baseline
 - Muppet
