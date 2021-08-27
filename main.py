@@ -349,10 +349,17 @@ def main():
     task_types = train_dataloader.get_task_types()
     task_types = list(set(task_types))
     task_types.sort()
-    multitask_model = MultitaskModel.create(
-        model_name = model_name,
-        model_types = task_types
-    )
+    if training_args.resume_from_checkpoint is not None:
+        checkpoint = training_args.resume_from_checkpoint
+        multitask_model = MultitaskModel.create(
+            model_name = model_name,
+            model_types = ["cls1","cls2","mc","span"]
+        )
+    else :
+        multitask_model = MultitaskModel.create(
+            model_name = model_name,
+            model_types = task_types
+        )
     multitask_model.to(device)
 
     if data_args.max_seq_length is None:
@@ -402,6 +409,10 @@ def main():
     #    for i, param in enumerate(multitask_model.parameters()):
     #        fo.write(f"{str(i)}\t{param.size()}\n")
 
+    if training_args.resume_from_checkpoint is not None:
+        unwrapped_model = accelerator.unwrap_model(multitask_model)
+        unwrapped_model.load_state_dict(torch.load(checkpoint+"/pytorch_model.bin"))
+
     total_batch_size = training_args.per_device_train_batch_size * accelerator.num_processes * training_args.gradient_accumulation_steps
 
     # Scheduler and math around the number of training steps.
@@ -428,7 +439,7 @@ def main():
     logger.info(f"  Total optimization steps = {model_args.max_train_steps}")
 
 
-    devices = {"TASK1" : "cuda:1", "TASK2" : "cuda:2", "TASK3" : "cuda:4", "TASK4" : "cuda:4", "TASK5" : "cuda:6", "TASK6" : "cuda:7"}
+    devices = {"TASK1" : "cuda:1", "TASK2" : "cuda:2", "TASK3" : "cuda:4", "TASK4" : "cuda:4", "TASK5" : "cuda:6", "TASK6" : "cuda:3"}
     datasets.logging.set_verbosity(datasets.logging.ERROR)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(model_args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -489,7 +500,7 @@ def main():
                 outputs = multitask_model(**task_batch)
                 # scaling need
                 scale_factor = train_dataloader.get_scaling_factor(key)
-                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log10(scale_factor)
+                loss = outputs.loss / training_args.gradient_accumulation_steps / math.log(scale_factor, 1000)
                 cur_loss[key] = outputs.loss.item()
                 accelerator.backward(loss)
             if (completed_steps) % 50 == 0 :

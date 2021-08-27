@@ -17,7 +17,7 @@
     
     "do_train" : true,
     "do_eval" : true,
-    "output_dir" : "/home/aimaster/lab_storage/models/test/mtl_limited_train2",
+    "output_dir" : "/home/aimaster/lab_storage/models/test/mtl_limited_train2_pre_train_more2",
     "evaluation_strategy" : "epoch",
     "per_device_train_batch_size" : 10,
     "per_device_eval_batch_size" : 10,
@@ -25,7 +25,9 @@
     "adafactor" : false,
     "num_train_epochs" : 20,
     "lr_scheduler_type" : "linear",
-    "seed" : 32,
+    "seed" : 42,
+    "resume_from_checkpoint" : "/home/aimaster/lab_storage/models/test/mtl_limited_train2/epoch_19",
+    "learning_rate" : 2e-5,
     "overwrite_output" : true
 }
 

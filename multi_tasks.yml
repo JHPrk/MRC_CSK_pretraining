@@ -63,4 +63,4 @@ TASK6:
   task_id: 6
   dataroot: commonsense/cosmosQA
   max_seq_length: 1024
-  train_split: eval
+  train_split: train_eval
